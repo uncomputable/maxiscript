@@ -1,2 +1,3 @@
+pub mod opcodes;
 pub mod optimize;
-mod parse;
+// mod parse;
