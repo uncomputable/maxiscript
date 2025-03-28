@@ -273,29 +273,37 @@ impl<T: Ord> Ord for State<T> {
     }
 }
 
+/// Computes a minimal Bitcoin script that manipulates the `source_stack`
+/// such that the items from the `target` are on the top of the stack.
+///
+/// If a value exists in the `target` but not in the `source_stack`,
+/// then no Bitcoin script can push this value onto the stack top.
+/// In this case, this function returns `None`.
+///
+/// ## Complexity
+///
+/// In the worst case, the algorithm will check 7^(2n) scripts for a target of size n.
+/// In other words, the algorithm takes exponential time in the target size.
 pub fn find_shortest_transformation<T: Clone + Ord + std::fmt::Debug + std::hash::Hash>(
     source_stack: &[T],
-    target_stack_top: &[T],
+    target: &[T],
 ) -> Option<State<T>> {
-    if target_stack_top
-        .iter()
-        .any(|name| !source_stack.contains(name))
-    {
+    if target.iter().any(|name| !source_stack.contains(name)) {
         return None;
     }
 
-    let initial_state = State::new(target_stack_top.to_vec());
+    let initial_state = State::new(target.to_vec());
     let mut priority_queue = BinaryHeap::from([initial_state]);
 
     // Each reverse application of opcode reduces target by 1
     // Termination is guaranteed
     while let Some(state) = priority_queue.pop() {
         debug_assert!(
-            state.target.len() <= target_stack_top.len(),
+            state.target.len() <= target.len(),
             "the target should never increase in size"
         );
         debug_assert!(
-            state.script_bytes <= target_stack_top.len() * 2,
+            state.script_bytes <= target.len() * 2,
             "maximum transformation cost should be 2 times target size (using OP_PICK)"
         );
         if state.target.len() <= source_stack.len()
@@ -332,8 +340,7 @@ mod tests {
     #[test]
     fn find_manipulation_out_of_memory_regression() {
         let source = &[235, 154, 0, 46, 255];
-        let target = &[255, 235, 154, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let state =
-            find_shortest_transformation(source, target).expect("there should be a transformation");
+        let target = &[255, 235, 154, 0, 0, 0, 0, 0, 0, 0];
+        find_shortest_transformation(source, target).expect("there should be a transformation");
     }
 }

@@ -6,6 +6,10 @@ use bitfony::opcodes::{find_shortest_transformation, StackOp};
 fuzz_target!(|input: (&[u8], &[u8])| {
     let (source_stack, target) = input;
 
+    // Bail out to prevent exponential time and memory use.
+    if 5 < target.len() {
+        return;
+    }
     // Target contains item that is not contained in source stack.
     // There is no transformation from source to target, so bail out early.
     if target.iter().any(|x| !source_stack.contains(x)) {
