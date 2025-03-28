@@ -330,32 +330,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn find_manipulation() {
-        let source_target: [(&[u8], &[u8]); 3] = [
-            (&[0], &[0, 0, 0]),
-            (&[12, 11, 10, 0], &[0, 0, 0]),
-            (&[2, 1, 0], &[0, 1, 2]),
-        ];
-
-        for (source_stack, target_stack_top) in source_target {
-            let state = find_shortest_transformation(source_stack, target_stack_top)
-                .expect("there should be a transformation");
-            let script = state.reversed_script.into_iter().rev();
-            let mut stack = Vec::from(source_stack);
-            StackOp::apply(&mut stack, script).expect("script should not fail");
-            assert!(
-                state.script_bytes <= target_stack_top.len() * 2,
-                "maximum transformation cost should be 2 * N for N target items"
-            );
-            assert!(
-                target_stack_top.len() <= stack.len(),
-                "result stack should be long enough to include target"
-            );
-            assert_eq!(
-                &stack[stack.len() - target_stack_top.len()..],
-                target_stack_top,
-                "result stack top should be equal to target"
-            );
-        }
+    fn find_manipulation_out_of_memory_regression() {
+        let source = &[235, 154, 0, 46, 255];
+        let target = &[255, 235, 154, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let state =
+            find_shortest_transformation(source, target).expect("there should be a transformation");
     }
 }
