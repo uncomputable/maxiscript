@@ -9,9 +9,14 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+bitfony = { path = ".." }
 
-[dependencies.bitfony]
-path = ".."
+[[bin]]
+name = "parse_display"
+path = "fuzz_targets/parse_display.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "stack_transform"
