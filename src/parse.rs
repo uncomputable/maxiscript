@@ -1,11 +1,13 @@
+use std::fmt;
+use std::sync::Arc;
+
+use bitcoin::script::PushBytesBuf;
 use chumsky::input::ValueInput;
 use chumsky::prelude::{
     any, end, just, one_of, skip_then_retry_until, IterParser, Rich, SimpleSpan,
 };
 use chumsky::{extra, select, text, Parser};
 use hex_conservative::{DisplayHex, FromHex};
-use std::fmt;
-use std::sync::Arc;
 
 pub type Span = SimpleSpan;
 pub type Spanned<T> = (T, Span);
@@ -91,7 +93,7 @@ impl fmt::Display for Program<'_> {
         for (index, stmt) in self.statements().iter().enumerate() {
             write!(f, "{stmt};")?;
             if index < self.statements().len() - 1 {
-                writeln!(f, "")?;
+                writeln!(f)?;
             }
         }
         Ok(())
@@ -127,7 +129,7 @@ pub struct Assignment<'src> {
 
 impl<'src> Assignment<'src> {
     /// Accesses the variable that is being assigned.
-    pub fn variable(&self) -> &VariableName<'src> {
+    pub fn assignee(&self) -> &VariableName<'src> {
         &self.variable
     }
 
@@ -149,7 +151,7 @@ pub enum Expression<'src> {
     /// Return the value of a variable.
     Variable(VariableName<'src>),
     /// Return constant bytes.
-    Bytes(Arc<[u8]>),
+    Bytes(PushBytesBuf),
     /// Return the output of a function call.
     Call(Call<'src>),
 }
@@ -158,7 +160,7 @@ impl fmt::Display for Expression<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expression::Variable(name) => write!(f, "{name}"),
-            Expression::Bytes(bytes) => write!(f, "0x{}", bytes.to_lower_hex_string()),
+            Expression::Bytes(bytes) => write!(f, "0x{}", bytes.as_bytes().to_lower_hex_string()),
             Expression::Call(call) => write!(f, "{call}"),
         }
     }
@@ -168,27 +170,27 @@ impl fmt::Display for Expression<'_> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Call<'src> {
     name: OpcodeName,
-    args: Arc<[VariableName<'src>]>,
+    args_target: Arc<[VariableName<'src>]>,
 }
 
 impl Call<'_> {
-    /// Accesses the name of the called function.
+    /// Gets the name of the called function.
     pub fn name(&self) -> &OpcodeName {
         &self.name
     }
 
-    /// Accesses the arguments of the function call.
-    pub fn args(&self) -> &[VariableName] {
-        &self.args
+    /// Gets the arguments of the function call.
+    pub fn args_target(&self) -> &[VariableName] {
+        &self.args_target
     }
 }
 
 impl fmt::Display for Call<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}(", self.name)?;
-        for (index, arg) in self.args().iter().enumerate() {
+        for (index, arg) in self.args_target().iter().rev().enumerate() {
             write!(f, "{arg}")?;
-            if index < self.args().len() - 1 {
+            if index < self.args_target().len() - 1 {
                 write!(f, ", ")?;
             }
         }
@@ -197,10 +199,47 @@ impl fmt::Display for Call<'_> {
 }
 
 /// The name of an opcode.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OpcodeName {
     Add,
     EqualVerify,
+}
+
+impl OpcodeName {
+    /// Gets the number of arguments of the opcode.
+    ///
+    /// Arguments are popped from the stack.
+    pub const fn n_args(self) -> usize {
+        match self {
+            OpcodeName::Add => 2,
+            OpcodeName::EqualVerify => 2,
+        }
+    }
+
+    /// Gets the number of return values of the opcode.
+    ///
+    /// Return values are pushed onto the stack.
+    pub const fn n_rets(self) -> usize {
+        match self {
+            OpcodeName::Add => 1,
+            OpcodeName::EqualVerify => 0,
+        }
+    }
+
+    /// Checks if the opcode is a unit operation.
+    ///
+    /// Unit operations return nothing.
+    pub const fn is_unit(self) -> bool {
+        self.n_rets() == 0
+    }
+
+    /// Returns the corresponding [`bitcoin::Opcode`].
+    pub const fn to_opcode(self) -> bitcoin::Opcode {
+        match self {
+            OpcodeName::Add => bitcoin::opcodes::all::OP_ADD,
+            OpcodeName::EqualVerify => bitcoin::opcodes::all::OP_EQUALVERIFY,
+        }
+    }
 }
 
 impl fmt::Display for OpcodeName {
@@ -259,10 +298,11 @@ where
     let hex = select! { Token::Hex(s) => s }
         .map(|s| {
             debug_assert_eq!(s.len() % 2, 0, "there should be pairs of hex characters");
-            Vec::<u8>::from_hex(s)
-                .map(Arc::from)
-                .map(Expression::Bytes)
-                .expect("string should be hex")
+            let vec = Vec::<u8>::from_hex(s).expect("string should be hex");
+            // TODO: Handle failure case when hex is too long
+            let push_bytes =
+                bitcoin::script::PushBytesBuf::try_from(vec).expect("hex should not be too long");
+            Expression::Bytes(push_bytes)
         })
         .map_with(|expr, e| (expr, e.span()));
 
@@ -292,7 +332,7 @@ where
         .map(|(name, args)| {
             Expression::Call(Call {
                 name,
-                args: Arc::from(args),
+                args_target: args.into_iter().rev().collect(),
             })
         })
         .map_with(|expr, e| (expr, e.span()))

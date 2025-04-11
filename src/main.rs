@@ -1,7 +1,5 @@
-mod parse;
-
 use ariadne::{sources, Color, Label, Report, ReportKind};
-use bitfony::{lex_program, parse_program};
+use bitfony::{compile, lex_program, parse_program};
 use std::{env, fs};
 
 fn main() {
@@ -17,6 +15,8 @@ fn main() {
 
     if let Some(program) = program {
         println!("{program}");
+        let script = compile(program).expect("should compile");
+        println!("{script:?}");
     }
 
     lex_errs

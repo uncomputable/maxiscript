@@ -4,9 +4,13 @@ use crate::parse::{lexer, program_parser, Program, Span, Spanned, Token};
 use chumsky::prelude::{Input, Rich};
 use chumsky::Parser;
 
-pub mod opcodes;
-pub mod optimize;
-pub mod parse;
+mod compile;
+mod opcodes;
+mod optimize;
+mod parse;
+mod util;
+
+pub use compile::compile;
 
 pub type ErrorSet<'src> = Vec<Rich<'src, String, Span>>;
 
@@ -24,14 +28,14 @@ pub fn parse_program<'src>(
 }
 
 pub fn parse_program_string(src: &str) -> Option<String> {
-    let (tokens, lex_errs) = lex_program(&src);
+    let (tokens, lex_errs) = lex_program(src);
 
     if !lex_errs.is_empty() {
         return None;
     }
 
     let (program, parse_errs) = match tokens.as_ref() {
-        Some(tokens) => parse_program(&src, tokens),
+        Some(tokens) => parse_program(src, tokens),
         None => (None, Vec::default()),
     };
 
