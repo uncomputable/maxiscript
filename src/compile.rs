@@ -100,8 +100,8 @@ fn compile_expr(
 
             match find_shortest_transformation(stack.variables(), call.args_target()) {
                 None => return Err("Variable was not defined".to_string()),
-                Some(state) => {
-                    for op in state.reversed_script.iter() {
+                Some(trans_script) => {
+                    for op in trans_script.iter() {
                         let opcode = match op {
                             StackOp::Dup => bitcoin::opcodes::all::OP_DUP,
                             StackOp::_2Dup => bitcoin::opcodes::all::OP_2DUP,

@@ -1,4 +1,5 @@
 /// Similar to [`std::slice::split_last_chunk`], but replace missing elements with `None`.
+#[allow(dead_code)]
 pub const fn split_last_chunk<const N: usize, T>(s: &[T]) -> (&[T], [Option<&T>; N]) {
     let front = match s.split_last_chunk::<N>() {
         Some((front, _)) => front,
