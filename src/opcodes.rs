@@ -76,8 +76,19 @@ pub struct ScriptFailed;
 //     }
 // }
 
-fn option_eq<T: Eq>(a: &T, b: Option<&T>) -> bool {
-    b.map(|b| a == b).unwrap_or(true)
+fn unify<'a, T: Eq>(a: Option<&'a T>, b: Option<&'a T>) -> Option<&'a T> {
+    match (a, b) {
+        (Some(a), Some(b)) if a == b => Some(a),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        _ => None,
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+enum Above<T> {
+    Push(T),
+    Tuck,
 }
 
 impl<T: Clone + Eq + fmt::Debug> StackOp<T> {
@@ -218,143 +229,168 @@ impl<T: Clone + Eq + fmt::Debug> StackOp<T> {
     /// this function returns the necessary source stack top.
     ///
     /// This function returns `None` is the target stack top is unreachable.
-    pub fn reverse_apply(target: &[Option<T>], above: &[T]) -> Vec<(Self, Vec<Option<T>>, Vec<T>)> {
+    pub fn reverse_apply(
+        target: &[Option<T>],
+        above: &[Above<T>],
+    ) -> Vec<(Self, Vec<Option<T>>, Vec<Above<T>>)> {
         let mut sources = Vec::new();
 
         // OP_DUP
+        //
+        // [.. 0] → [.. 0 0]
+        // [   0] → [   _ 0]
         let (bottom, [top0_prime, top0]) = util::split_last_chunk2(target);
 
-        if let Some(top0) = top0 {
-            if option_eq(top0, top0_prime) {
-                dbg!(Self::Dup, top0);
-                sources.push((
-                    Self::Dup,
-                    bottom.iter().cloned().chain([Some(top0.clone())]).collect(),
-                    [top0].into_iter().chain(above).cloned().collect(),
-                ));
-            }
+        if let Some(top0) = unify(top0, top0_prime) {
+            sources.push((
+                Self::Dup,
+                bottom.iter().cloned().chain([Some(top0.clone())]).collect(),
+                [Above::Push(top0.clone())]
+                    .into_iter()
+                    .chain(above.iter().cloned())
+                    .collect(),
+            ));
         }
 
         // OP_2DUP
+        //
+        // [.. 1 0] → [.. 1 0 1 0]
+        // [   1 0] → [   _ 0 1 0]
+        // [   1 0] → [   _ _ 1 0]
         let (bottom, [top1_prime, top0_prime, top1, top0]) = util::split_last_chunk2(target);
 
-        if let (Some(top1), Some(top0)) = (top1, top0) {
-            if option_eq(top1, top1_prime) && option_eq(top0, top0_prime) {
-                sources.push((
-                    Self::_2Dup,
-                    bottom
-                        .iter()
-                        .cloned()
-                        .chain([Some(top1.clone()), Some(top0.clone())])
-                        .collect(),
-                    [top1, top0].into_iter().chain(above).cloned().collect(),
-                ));
-            }
+        if let (Some(top1), Some(top0)) = (unify(top1, top1_prime), unify(top0, top0_prime)) {
+            sources.push((
+                Self::_2Dup,
+                bottom
+                    .iter()
+                    .cloned()
+                    .chain([Some(top1.clone()), Some(top0.clone())])
+                    .collect(),
+                [Above::Push(top1.clone()), Above::Push(top0.clone())]
+                    .into_iter()
+                    .chain(above.iter().cloned())
+                    .collect(),
+            ));
         }
 
         // OP_3DUP
+        //
+        // [.. 2 1 0] → [.. 2 1 0 2 1 0]
+        // [   2 1 0] → [   _ 1 0 2 1 0]
+        // [   2 1 0] → [   _ _ 0 2 1 0]
+        // [   2 1 0] → [   _ _ _ 2 1 0]
         let (bottom, [top2_prime, top1_prime, top0_prime, top2, top1, top0]) =
             util::split_last_chunk2(target);
 
-        if let (Some(top2), Some(top1), Some(top0)) = (top2, top1, top0) {
-            if option_eq(top2, top2_prime)
-                && option_eq(top1, top1_prime)
-                && option_eq(top0, top0_prime)
-            {
-                sources.push((
-                    Self::_3Dup,
-                    bottom
-                        .iter()
-                        .cloned()
-                        .chain([Some(top2.clone()), Some(top1.clone()), Some(top0.clone())])
-                        .collect(),
-                    [top2, top1, top0]
-                        .into_iter()
-                        .chain(above)
-                        .cloned()
-                        .collect(),
-                ));
-            }
+        if let (Some(top2), Some(top1), Some(top0)) = (
+            unify(top2, top2_prime),
+            unify(top1, top1_prime),
+            unify(top0, top0_prime),
+        ) {
+            sources.push((
+                Self::_3Dup,
+                bottom
+                    .iter()
+                    .cloned()
+                    .chain([Some(top2.clone()), Some(top1.clone()), Some(top0.clone())])
+                    .collect(),
+                [
+                    Above::Push(top2.clone()),
+                    Above::Push(top1.clone()),
+                    Above::Push(top0.clone()),
+                ]
+                .into_iter()
+                .chain(above.iter().cloned())
+                .collect(),
+            ));
         }
 
         // OP_OVER
+        //
+        // [.. 1 0] → [.. 1 0 1]
+        // [   1 0] → [   _ 0 1]
+        // [   1 _] → [   _ _ 1]
         let (bottom, [top1_prime, top0, top1]) = util::split_last_chunk2(target);
 
-        if let Some(top1) = top1 { // fixme
-            if option_eq(top1, top1_prime) {
-                sources.push((
-                    Self::Over,
-                    bottom
-                        .iter()
-                        .cloned()
-                        .chain([Some(top1.clone()), top0.cloned()])
-                        .collect(),
-                    [top1].into_iter().chain(above).cloned().collect(),
-                ));
-            }
+        if let Some(top1) = unify(top1, top1_prime) {
+            sources.push((
+                Self::Over,
+                bottom
+                    .iter()
+                    .cloned()
+                    .chain([Some(top1.clone()), top0.cloned()])
+                    .collect(),
+                [Above::Push(top1.clone())]
+                    .into_iter()
+                    .chain(above.iter().cloned())
+                    .collect(),
+            ));
         }
 
-        // free variables occur only in target for source stack
-        // argument target is determined from the start
-        // free variables are produced by OP_OVER on the last application (arg target becomes empty)
-        //
-        // [ target: x ] <-OVER-- [ below: x _ ] [ target: () ]
-        //
-        // or by OP_2OVER on the last or second-last application (arg target becomes 0 or 1 items)
-        //
-        // [ target: 3 2   ] <-2OVER-- [ below: 3 2 _ _ ] [ target: () ]
-        // [ target: 0 3 2 ] <-2OVER-- [ below: 3 2 _   ] [ target: 0  ]
-        //
-        // [ 3 2 0 ] [] --DUP-> [ 3 2 0 ] [ 0 ] --2OVER-> [ 3 2 0 ] [ 0 3 2 ]
-
         // OP_2OVER
+        //
+        // [.. 3 2 1 0] → [.. 3 2 1 0 3 2]
+        // [   3 2 1 0] → [   _ 2 1 0 3 2]
+        // [   3 2 1 0] → [   _ _ 1 0 3 2]
+        // [   3 2 _ 0] → [   _ _ _ 0 3 2]
+        // [   3 2 _ _] → [   _ _ _ _ 3 2]
         let (bottom, [top3_prime, top2_prime, top1, top0, top3, top2]) =
             util::split_last_chunk2(target);
 
-        if let (Some(top2), Some(top3)) = (top2, top3) {
-            if option_eq(top2, top2_prime) && option_eq(top3, top3_prime) {
-                dbg!(Self::_2Over, top0, top1, top2, top3);
-
-                sources.push((
-                    Self::_2Over,
-                    bottom
-                        .iter()
-                        .cloned()
-                        .chain([
-                            Some(top3.clone()),
-                            Some(top2.clone()),
-                            top1.cloned(),
-                            top0.cloned(),
-                        ])
-                        .collect(),
-                    [top3, top2].into_iter().chain(above).cloned().collect(),
-                ));
-            }
+        if let (Some(top3), Some(top2)) = (unify(top3, top3_prime), unify(top2, top2_prime)) {
+            sources.push((
+                Self::_2Over,
+                bottom
+                    .iter()
+                    .cloned()
+                    .chain([
+                        Some(top3.clone()),
+                        Some(top2.clone()),
+                        top1.cloned(),
+                        top0.cloned(),
+                    ])
+                    .collect(),
+                [Above::Push(top3.clone()), Above::Push(top2.clone())]
+                    .into_iter()
+                    .chain(above.iter().cloned())
+                    .collect(),
+            ));
         }
 
         // OP_TUCK
+        //
+        // [.. 1 0] → [.. 0 1 0]
+        // [   1 0] → [   _ 1 0]
+        // [   _ 0] → [   _ _ 0]
         let (bottom, [top0_prime, top1, top0]) = util::split_last_chunk2(target);
 
-        if let Some(top0) = top0 {
-            if option_eq(top0, top0_prime) {
-                sources.push((
-                    Self::Tuck,
-                    bottom
-                        .iter()
-                        .cloned()
-                        .chain([top1.cloned(), Some(top0.clone())])
-                        .collect(),
-                    [top0].into_iter().chain(above).cloned().collect(),
-                ));
-            }
+        if let Some(top0) = unify(top0, top0_prime) {
+            sources.push((
+                Self::Tuck,
+                bottom
+                    .iter()
+                    .cloned()
+                    .chain([top1.cloned(), Some(top0.clone())])
+                    .collect(),
+                [Above::Tuck]
+                    .into_iter()
+                    .chain(above.iter().cloned())
+                    .collect(),
+            ));
         }
 
-        // OP_PICK
+        // OP_PICK X
+        //
+        // [.. X ..] → [.. X .. X]
         if let Some((bottom, [Some(top0)])) = target.split_last_chunk() {
             sources.push((
                 Self::Pick(top0.clone()),
                 Vec::from(bottom),
-                [top0].into_iter().chain(above).cloned().collect(),
+                [Above::Push(top0.clone())]
+                    .into_iter()
+                    .chain(above.iter().cloned())
+                    .collect(),
             ));
         }
 
@@ -367,7 +403,7 @@ pub struct State<T> {
     pub script_bytes: usize,
     pub reversed_script: Vec<StackOp<T>>,
     target: Vec<Option<T>>,
-    above: Vec<T>,
+    above: Vec<Above<T>>,
 }
 
 impl<T> State<T> {
@@ -378,6 +414,36 @@ impl<T> State<T> {
             target: target.into_iter().map(Some).collect(),
             above: Vec::new(),
         }
+    }
+}
+
+impl<T: Clone + Eq> State<T> {
+    pub fn matches(&self, source: &[T], target: &[T]) -> bool {
+        let mut above = Vec::with_capacity(target.len());
+        for op in &self.above {
+            match op {
+                Above::Push(x) => above.push(x),
+                Above::Tuck => {
+                    if above.len() < 2 {
+                        return false;
+                    }
+                    let last = *above.last().unwrap();
+                    let i = above.len() - 1;
+                    let j = above.len() - 2;
+                    above.swap(i, j);
+                    above.push(last);
+                }
+            }
+        }
+        if target.len() != above.len() || (0..target.len()).any(|i| &target[i] != above[i]) {
+            return false;
+        }
+
+        self.target.len() <= source.len()
+            && self.target.iter().enumerate().all(|(index, x)| match x {
+                Some(x) => &source[source.len() - self.target.len() + index] == x,
+                None => true,
+            })
     }
 }
 
@@ -422,22 +488,16 @@ pub fn find_shortest_transformation<T: Clone + Ord + std::fmt::Debug + std::hash
             state.script_bytes <= target.len() * 2,
             "maximum transformation cost should be 2 times target size (using OP_PICK)"
         );
-        //debug_assert!(state.target.len() <= source_stack.len());
 
-        if source_stack.len() < state.target.len() {
-            //println!("skip");
+        if target.len() < state.above.len() {
             continue;
         }
+
         if 2 * target.len() < state.script_bytes {
             panic!("Cost is too high");
         }
 
-        if state.above == target
-            && state.target.iter().enumerate().all(|(index, x)| match x {
-                Some(y) => &source_stack[source_stack.len() - state.target.len() + index] == y,
-                None => true,
-            })
-        {
+        if state.matches(source_stack, target) {
             return Some(state);
         }
 
@@ -469,6 +529,7 @@ pub fn find_shortest_transformation<T: Clone + Ord + std::fmt::Debug + std::hash
 mod tests {
     use super::*;
     use itertools::{repeat_n, Itertools};
+    use std::collections::HashMap;
 
     type Script = Vec<StackOp<usize>>;
 
@@ -480,11 +541,30 @@ mod tests {
     }
 
     #[test]
-    fn find_transformation_regession() {
+    fn find_transformation_regression1() {
+        // [0 0 1] --OVER-> [0 0 1 0] --2OVER-> [0 0 1 0 0 0]
+        // [0 0 0] <-2OVER-- [0 0 _ 0] <-OVER-- [0 0 _] = [0 0 1]
         let source = &[0, 0, 1];
         let target = &[0, 0, 0];
-        let script = find_shortest_transformation(source, target).expect("there should be a transformation").reversed_script;
+        let script = find_shortest_transformation(source, target)
+            .expect("there should be a transformation")
+            .reversed_script;
         assert_eq!(&[StackOp::_2Over, StackOp::Over], script.as_slice())
+    }
+
+    #[test]
+    fn find_transformation_regression2() {
+        // [0 1 2] --OVER-> [0 1 2 1] --Pick(0)-> [0 1 2 1 0] --TUCK-> [0 1 2 0 1 0]
+        // [0 1 0] <-TUCK-- [1 0] <-Pick(0)-- [1] <-OVER-- [1 _]
+        let source = &[0, 1, 2];
+        let target = &[0, 1, 0];
+        let script = find_shortest_transformation(source, target)
+            .expect("there should be a transformation")
+            .reversed_script;
+        assert_eq!(
+            &[StackOp::Tuck, StackOp::Pick(0), StackOp::Over],
+            script.as_slice()
+        )
     }
 
     fn stack_ops(target: &[usize]) -> impl Iterator<Item = StackOp<usize>> + Clone + '_ {
@@ -506,8 +586,44 @@ mod tests {
             .powerset()
     }
 
+    // type Stack = Vec<usize>;
+    //
+    // static BEST_SCRIPT: LazyLock<HashMap<Stack, HashMap<Stack, Script>>> = LazyLock::new(|| {
+    //     let mut outer = HashMap::new();
+    //
+    //     for source in repeat_n(0..3, 3).multi_cartesian_product() {
+    //         let mut inner = HashMap::new();
+    //
+    //         for target in repeat_n(0..3, 3).multi_cartesian_product() {
+    //             let mut best_script = Vec::default();
+    //             let mut best_cost = usize::MAX;
+    //
+    //             for script in all_copy_scripts(&[0, 1, 2]) {
+    //                 if script_is_functional_copy(&source, &target, &script) && script_cost(&script) < best_cost {
+    //                     best_cost = script_cost(&script);
+    //                     best_script = script;
+    //                 }
+    //             }
+    //
+    //             inner.insert(target.clone(), best_script);
+    //         }
+    //
+    //         outer.insert(source.clone(), inner);
+    //     }
+    //
+    //     outer
+    // });
+
     fn script_cost(script: &Script) -> usize {
         script.iter().map(StackOp::cost).sum()
+    }
+
+    fn multiset<T: std::hash::Hash + Eq>(slice: &[T]) -> HashMap<&T, usize> {
+        let mut map = HashMap::new();
+        for element in slice {
+            *map.entry(element).or_default() += 1;
+        }
+        map
     }
 
     fn script_is_functional_copy(source: &[usize], target: &[usize], script: &Script) -> bool {
@@ -515,14 +631,21 @@ mod tests {
         let result = StackOp::apply(&mut final_stack, script.iter().copied());
         result.is_ok()
             && source.len() + target.len() == final_stack.len()
-            && &final_stack[source.len()..] == target
+            && source == &final_stack[..source.len()]
+            && target == &final_stack[source.len()..]
     }
 
+    // TODO: Cache optimal scripts
     fn script_is_optimal_copy(
         source: &[usize],
         target: &[usize],
         script: &Script,
     ) -> Result<(), Script> {
+        // let best_script = BEST_SCRIPT.get(source).unwrap().get(target).unwrap();
+        // if script_cost(&best_script) < script_cost(script) {
+        //     return Err(best_script.clone());
+        // }
+
         for other_script in all_copy_scripts(target) {
             if script_cost(&other_script) < script_cost(script) {
                 if script_is_functional_copy(source, target, &other_script) {
@@ -536,66 +659,61 @@ mod tests {
 
     fn transformation_is_optimal<const N: usize>() {
         for source in repeat_n(0..N, N).multi_cartesian_product() {
-            debug_assert_eq!(source.len(), N);
-            for target_size in 0..=N {
-                for target in repeat_n(0..target_size, target_size).multi_cartesian_product() {
-                    debug_assert!(target.len() <= N);
-                    if let Some(state) = find_shortest_transformation(&source, &target) {
-                        let script: Vec<_> =
-                            state.reversed_script.into_iter().rev().collect();
-                        if !script_is_functional_copy(&source, &target, &script) {
-                            eprintln!("Source stack: {source:?}");
-                            eprintln!("Target stack top: {target:?}");
-                            panic!("Script is not functional copy: {script:?}");
-                        }
-                        if let Err(other_script) =
-                            script_is_optimal_copy(&source, &target, &script)
-                        {
-                            eprintln!("Source stack: {source:?}");
-                            eprintln!("Target stack top: {target:?}");
-                            eprintln!("Computed script: {script:?}");
-                            panic!("Other script is better: {other_script:?}");
+            for target in repeat_n(0..N, N).multi_cartesian_product() {
+                if let Some(state) = find_shortest_transformation(&source, &target) {
+                    let script: Vec<_> = state.reversed_script.into_iter().rev().collect();
+                    if !script_is_functional_copy(&source, &target, &script) {
+                        eprintln!("Source stack: {source:?}");
+                        eprintln!("Target stack top: {target:?}");
+                        panic!("Script is not functional copy: {script:?}");
+                    }
+                    if let Err(other_script) = script_is_optimal_copy(&source, &target, &script) {
+                        eprintln!("Source stack: {source:?}");
+                        eprintln!("Target stack top: {target:?}");
+                        eprintln!("Computed script: {script:?}");
+                        panic!("Other script is better: {other_script:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transformation_is_optimal3() {
+        // transformation_is_optimal::<3>();
+
+        for top0 in 0..3 {
+            for top1 in 0..3 {
+                for top2 in 0..3 {
+                    let source = &[top2, top1, top0];
+
+                    for target0 in 0..3 {
+                        for target1 in 0..3 {
+                            for target2 in 0..3 {
+                                let target = &[target2, target1, target0];
+
+                                if let Some(state) = find_shortest_transformation(source, target) {
+                                    let script: Vec<_> =
+                                        state.reversed_script.into_iter().rev().collect();
+                                    if !script_is_functional_copy(source, target, &script) {
+                                        eprintln!("Source stack: {source:?}");
+                                        eprintln!("Target stack top: {target:?}");
+                                        panic!("Script is not functional copy: {script:?}");
+                                    }
+                                    if let Err(other_script) =
+                                        script_is_optimal_copy(source, target, &script)
+                                    {
+                                        eprintln!("Source stack: {source:?}");
+                                        eprintln!("Target stack top: {target:?}");
+                                        eprintln!("Computed script: {script:?}");
+                                        panic!("Other script is better: {other_script:?}");
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-
-        // for top0 in 0..3 {
-        //     for top1 in 0..3 {
-        //         for top2 in 0..3 {
-        //             let source = &[top2, top1, top0];
-        //
-        //             for target0 in 0..3 {
-        //                 for target1 in 0..3 {
-        //                     let target = &[target1, target0];
-        //
-        //                     if let Some(state) = find_shortest_transformation(source, target) {
-        //                         let script: Vec<_> =
-        //                             state.reversed_script.into_iter().rev().collect();
-        //                         if !script_is_functional_copy(source, target, &script) {
-        //                             eprintln!("Source stack: {source:?}");
-        //                             eprintln!("Target stack top: {target:?}");
-        //                             panic!("Script is not functional copy: {script:?}");
-        //                         }
-        //                         if let Err(other_script) =
-        //                             script_is_optimal_copy(source, target, &script)
-        //                         {
-        //                             eprintln!("Source stack: {source:?}");
-        //                             eprintln!("Target stack top: {target:?}");
-        //                             eprintln!("Computed script: {script:?}");
-        //                             panic!("Other script is better: {other_script:?}");
-        //                         }
-        //                     }
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
-    }
-
-    #[test]
-    fn transformation_is_optimal3() {
-        transformation_is_optimal::<3>()
     }
 }
