@@ -40,12 +40,17 @@ impl<'src> Stack<'src> {
         &self.variables
     }
 
-    pub fn position(&self, name: &VariableName<'src>) -> Option<Position> {
+    pub fn position(&self, name: &VariableName<'src>, pushed_args: usize) -> Option<Position> {
         debug_assert!(
             size_of::<u32>() <= size_of::<usize>(),
             "32-bit machine or higher"
         );
-        let pos = self.variables.iter().rev().position(|x| x == name)?;
+        let pos = self
+            .variables
+            .iter()
+            .rev()
+            .position(|x| x == name)?
+            .saturating_add(pushed_args);
         let [b0, b1, b2, b3, ..] = pos.to_le_bytes();
         if pos <= u8::MAX as usize {
             Some(Position::U8([b0]))
@@ -101,6 +106,8 @@ fn compile_expr(
             match find_shortest_transformation(stack.variables(), call.args_target()) {
                 None => return Err("Variable was not defined".to_string()),
                 Some(trans_script) => {
+                    let mut pushed_args = 0;
+
                     for op in trans_script.iter() {
                         let opcode = match op {
                             StackOp::Dup => bitcoin::opcodes::all::OP_DUP,
@@ -112,13 +119,21 @@ fn compile_expr(
                             StackOp::Pick(name) => {
                                 script.push_slice(
                                     stack
-                                        .position(name)
+                                        .position(name, pushed_args)
                                         .expect("variable definition is checked beforehand"),
                                 );
                                 bitcoin::opcodes::all::OP_PICK
                             }
                         };
                         script.push_opcode(opcode);
+
+                        match op {
+                            StackOp::Dup | StackOp::Over | StackOp::Tuck | StackOp::Pick(_) => {
+                                pushed_args += 1
+                            }
+                            StackOp::_2Dup | StackOp::_2Over => pushed_args += 2,
+                            StackOp::_3Dup => pushed_args += 3,
+                        }
                     }
                 }
             }
