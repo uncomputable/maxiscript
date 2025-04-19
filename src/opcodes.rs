@@ -1,5 +1,7 @@
 use crate::util;
+use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZero;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StackOp<T> {
@@ -52,10 +54,61 @@ impl<T> StackOp<T> {
             _ => 1,
         }
     }
+
+    pub fn map<S, F: Fn(T) -> S>(self, f: F) -> StackOp<S> {
+        match self {
+            StackOp::Pick(x) => StackOp::Pick(f(x)),
+            StackOp::Roll(x) => StackOp::Roll(f(x)),
+            StackOp::Dup => StackOp::Dup,
+            StackOp::_2Dup => StackOp::_2Dup,
+            StackOp::_3Dup => StackOp::_3Dup,
+            StackOp::Over => StackOp::Over,
+            StackOp::_2Over => StackOp::_2Over,
+            StackOp::Tuck => StackOp::Tuck,
+            StackOp::Swap => StackOp::Swap,
+            StackOp::_2Swap => StackOp::_2Swap,
+            StackOp::Rot => StackOp::Rot,
+            StackOp::_2Rot => StackOp::_2Rot,
+        }
+    }
 }
 
 fn script_cost<T>(script: &[StackOp<T>]) -> usize {
     script.iter().map(StackOp::cost).sum()
+}
+
+type Id = NonZero<u8>;
+
+fn get_maps<T: Eq + std::hash::Hash>(slice: &[T]) -> (Vec<Id>, HashMap<&T, Id>, HashMap<Id, &T>) {
+    assert!(slice.len() < 255, "slice must be shorter than 255 items");
+    let mut forward_map: HashMap<&T, Id> = HashMap::new();
+    let mut backward_map: HashMap<Id, &T> = HashMap::new();
+
+    // First pass: build the maps
+    for item in slice.iter().rev() {
+        if !forward_map.contains_key(item) {
+            debug_assert!(forward_map.len() < 255);
+            // safety: 0 < length + 1 ≤ 255
+            let index = unsafe { Id::new_unchecked(forward_map.len() as u8 + 1) };
+            forward_map.insert(item, index);
+            backward_map.insert(index, item);
+        }
+    }
+
+    // Second pass: create the transformed vector
+    let mapped_vec: Vec<Id> = slice
+        .iter()
+        .map(|item| *forward_map.get(item).unwrap())
+        .collect();
+
+    (mapped_vec, forward_map, backward_map)
+}
+
+fn apply_map<S: Eq + std::hash::Hash, T: Clone>(
+    slice: &[S],
+    map: &HashMap<&S, T>,
+) -> Vec<Option<T>> {
+    slice.iter().map(|id| map.get(id).cloned()).collect()
 }
 
 // TODO: Copy some elements, move other elements
@@ -84,8 +137,23 @@ pub fn find_shortest_transformation<T: Clone + Ord + fmt::Debug + std::hash::Has
     if target.iter().any(|name| !source.contains(name)) {
         return None;
     }
+    if 255 <= target.len() {
+        return None;
+    }
 
-    let initial_state = State::new(target.to_vec());
+    let (mapped_target, map, map_back) = get_maps(target);
+    let mapped_source = apply_map(source, &map);
+    let mapped_script = find_shortest_transformation_(&mapped_source, &mapped_target);
+
+    let script = mapped_script
+        .into_iter()
+        .map(|op| op.map(|x| (*map_back.get(&x).unwrap()).clone()))
+        .collect();
+    Some(script)
+}
+
+fn find_shortest_transformation_(source: &[Option<Id>], target: &[Id]) -> Vec<StackOp<Id>> {
+    let initial_state = State::new(target);
     let mut queue_n_plus_0 = vec![initial_state];
     let mut queue_n_plus_1 = Vec::new();
     let mut script_bytes = 0;
@@ -107,7 +175,7 @@ pub fn find_shortest_transformation<T: Clone + Ord + fmt::Debug + std::hash::Has
                 continue;
             }
             if state.matches(source, target) {
-                return Some(state.script);
+                return state.script;
             }
 
             queue_n_plus_1.extend(state.reverse_apply1());
@@ -120,9 +188,9 @@ pub fn find_shortest_transformation<T: Clone + Ord + fmt::Debug + std::hash::Has
     }
 }
 
-fn unify<'a, T: Eq>(a: Option<&'a T>, b: Option<&'a T>) -> Option<&'a T> {
+const fn unify(a: Option<Id>, b: Option<Id>) -> Option<Id> {
     match (a, b) {
-        (Some(a), Some(b)) if a == b => Some(a),
+        (Some(a), Some(b)) if a.get() == b.get() => Some(a),
         (Some(a), None) => Some(a),
         (None, Some(b)) => Some(b),
         _ => None,
@@ -137,33 +205,31 @@ enum Above<T> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct State<T> {
-    script: Vec<StackOp<T>>,
+struct State {
+    script: Vec<StackOp<Id>>,
     /// Stack elements that are required to reach this state.
     ///
     /// `None` elements are free variables that match anything.
-    target: Vec<Option<T>>,
+    target: Vec<Option<Id>>,
     /// Produced stack elements above target.
     ///
     /// The stack elements are encoded in a pseudo script.
-    above: Vec<Above<T>>,
+    above: Vec<Above<Id>>,
 }
 
-impl<T> State<T> {
-    pub fn new(target: Vec<T>) -> Self {
+impl State {
+    pub fn new(target: &[Id]) -> Self {
         Self {
             script: vec![],
-            target: target.into_iter().map(Some).collect(),
+            target: target.iter().copied().map(Some).collect(),
             above: Vec::new(),
         }
     }
-}
 
-impl<T: Clone + Eq> State<T> {
     /// Checks if the state matches the given `source` stack and the given `target` stack top.
-    pub fn matches(&self, source: &[T], target: &[T]) -> bool {
+    pub fn matches(&self, source: &[Option<Id>], target: &[Id]) -> bool {
         let mut above = Vec::with_capacity(target.len());
-        for op in &self.above {
+        for op in self.above.iter().copied() {
             match op {
                 Above::Push(x) => above.push(x),
                 // TODO: Allow target to merge with source stack, in case of moved variables
@@ -181,21 +247,26 @@ impl<T: Clone + Eq> State<T> {
         }
 
         // TODO: Allow target to merge with source stack, in case of moved variables
-        if target.len() != above.len() || (0..target.len()).any(|i| &target[i] != above[i]) {
+        if target != above {
             return false;
         }
 
         self.target.len() <= source.len()
-            && self.target.iter().enumerate().all(|(index, x)| match x {
-                Some(x) => &source[source.len() - self.target.len() + index] == x,
-                None => true,
-            })
+            && self
+                .target
+                .iter()
+                .copied()
+                .enumerate()
+                .all(|(index, x)| match x {
+                    Some(x) => source[source.len() - self.target.len() + index] == Some(x),
+                    None => true,
+                })
     }
 
-    fn make_child(&self, op: StackOp<T>, target: Vec<Option<T>>, above: Vec<Above<T>>) -> Self {
+    fn make_child(&self, op: StackOp<Id>, target: Vec<Option<Id>>, above: Vec<Above<Id>>) -> Self {
         State {
             script: std::iter::once(op)
-                .chain(self.script.iter().cloned())
+                .chain(self.script.iter().copied())
                 .collect(),
             target,
             above,
@@ -222,10 +293,10 @@ impl<T: Clone + Eq> State<T> {
             children.push(
                 self.make_child(
                     StackOp::Dup,
-                    bottom.iter().cloned().chain([Some(top0.clone())]).collect(),
-                    [Above::Push(top0.clone())]
+                    bottom.iter().copied().chain([Some(top0)]).collect(),
+                    [Above::Push(top0)]
                         .into_iter()
-                        .chain(self.above.iter().cloned())
+                        .chain(self.above.iter().copied())
                         .collect(),
                 ),
             );
@@ -244,12 +315,12 @@ impl<T: Clone + Eq> State<T> {
                     StackOp::_2Dup,
                     bottom
                         .iter()
-                        .cloned()
-                        .chain([Some(top1.clone()), Some(top0.clone())])
+                        .copied()
+                        .chain([Some(top1), Some(top0)])
                         .collect(),
-                    [Above::Push(top1.clone()), Above::Push(top0.clone())]
+                    [Above::Push(top1), Above::Push(top0)]
                         .into_iter()
-                        .chain(self.above.iter().cloned())
+                        .chain(self.above.iter().copied())
                         .collect(),
                 ),
             );
@@ -274,17 +345,13 @@ impl<T: Clone + Eq> State<T> {
                     StackOp::_3Dup,
                     bottom
                         .iter()
-                        .cloned()
-                        .chain([Some(top2.clone()), Some(top1.clone()), Some(top0.clone())])
+                        .copied()
+                        .chain([Some(top2), Some(top1), Some(top0)])
                         .collect(),
-                    [
-                        Above::Push(top2.clone()),
-                        Above::Push(top1.clone()),
-                        Above::Push(top0.clone()),
-                    ]
-                    .into_iter()
-                    .chain(self.above.iter().cloned())
-                    .collect(),
+                    [Above::Push(top2), Above::Push(top1), Above::Push(top0)]
+                        .into_iter()
+                        .chain(self.above.iter().copied())
+                        .collect(),
                 ),
             );
         }
@@ -300,14 +367,10 @@ impl<T: Clone + Eq> State<T> {
             children.push(
                 self.make_child(
                     StackOp::Over,
-                    bottom
-                        .iter()
-                        .cloned()
-                        .chain([Some(top1.clone()), top0.cloned()])
-                        .collect(),
-                    [Above::Push(top1.clone())]
+                    bottom.iter().copied().chain([Some(top1), top0]).collect(),
+                    [Above::Push(top1)]
                         .into_iter()
-                        .chain(self.above.iter().cloned())
+                        .chain(self.above.iter().copied())
                         .collect(),
                 ),
             );
@@ -329,17 +392,12 @@ impl<T: Clone + Eq> State<T> {
                     StackOp::_2Over,
                     bottom
                         .iter()
-                        .cloned()
-                        .chain([
-                            Some(top3.clone()),
-                            Some(top2.clone()),
-                            top1.cloned(),
-                            top0.cloned(),
-                        ])
+                        .copied()
+                        .chain([Some(top3), Some(top2), top1, top0])
                         .collect(),
-                    [Above::Push(top3.clone()), Above::Push(top2.clone())]
+                    [Above::Push(top3), Above::Push(top2)]
                         .into_iter()
-                        .chain(self.above.iter().cloned())
+                        .chain(self.above.iter().copied())
                         .collect(),
                 ),
             );
@@ -356,14 +414,10 @@ impl<T: Clone + Eq> State<T> {
             children.push(
                 self.make_child(
                     StackOp::Tuck,
-                    bottom
-                        .iter()
-                        .cloned()
-                        .chain([top1.cloned(), Some(top0.clone())])
-                        .collect(),
+                    bottom.iter().copied().chain([top1, Some(top0)]).collect(),
                     [Above::Tuck]
                         .into_iter()
-                        .chain(self.above.iter().cloned())
+                        .chain(self.above.iter().copied())
                         .collect(),
                 ),
             );
@@ -372,24 +426,26 @@ impl<T: Clone + Eq> State<T> {
         // // OP_SWAP
         // //
         // // [α 1 0] → [α 0 1]
-        // if let Some((bottom, [top0, top1])) = self.target.split_last_chunk() {
-        //     children.push(
-        //         self.make_child(
-        //             StackOp::Swap,
-        //             bottom.iter().chain([top1, top0]).cloned().collect(),
-        //             self.above.clone(),
-        //         ),
-        //     );
+        // if let Some((bottom, &[top0, top1])) = self.target.split_last_chunk() {
+        //     children.push(self.make_child(
+        //         StackOp::Swap,
+        //         bottom.iter().copied().chain([top1, top0]).collect(),
+        //         self.above.clone(),
+        //     ));
         // }
         //
         // // OP_2SWAP
         // //
         // // [α 3 2 1 0] → [α 1 0 3 2]
-        // if let Some((bottom, [top1, top0, top3, top2])) = self.target.split_last_chunk() {
+        // if let Some((bottom, &[top1, top0, top3, top2])) = self.target.split_last_chunk() {
         //     children.push(
         //         self.make_child(
         //             StackOp::_2Swap,
-        //             bottom.iter().chain([top3, top2, top1, top0]).cloned().collect(),
+        //             bottom
+        //                 .iter()
+        //                 .copied()
+        //                 .chain([top3, top2, top1, top0])
+        //                 .collect(),
         //             self.above.clone(),
         //         ),
         //     );
@@ -398,24 +454,28 @@ impl<T: Clone + Eq> State<T> {
         // // OP_ROT
         // //
         // // [α 2 1 0] → [α 1 0 2]
-        // if let Some((bottom, [top1, top0, top2])) = self.target.split_last_chunk() {
-        //     children.push(
-        //         self.make_child(
-        //             StackOp::Rot,
-        //             bottom.iter().chain([top2, top1, top0]).cloned().collect(),
-        //             self.above.clone(),
-        //         ),
-        //     );
+        // if let Some((bottom, &[top1, top0, top2])) = self.target.split_last_chunk() {
+        //     children.push(self.make_child(
+        //         StackOp::Rot,
+        //         bottom.iter().copied().chain([top2, top1, top0]).collect(),
+        //         self.above.clone(),
+        //     ));
         // }
         //
         // // OP_2ROT
         // //
         // // [α 5 4 3 2 1 0] → [α 3 2 1 0 5 4]
-        // if let Some((bottom, [top3, top2, top1, top0, top5, top4])) = self.target.split_last_chunk() {
+        // if let Some((bottom, &[top3, top2, top1, top0, top5, top4])) =
+        //     self.target.split_last_chunk()
+        // {
         //     children.push(
         //         self.make_child(
         //             StackOp::_2Rot,
-        //             bottom.iter().chain([top5, top4, top3, top2, top1, top0]).cloned().collect(),
+        //             bottom
+        //                 .iter()
+        //                 .copied()
+        //                 .chain([top5, top4, top3, top2, top1, top0])
+        //                 .collect(),
         //             self.above.clone(),
         //         ),
         //     );
@@ -430,14 +490,14 @@ impl<T: Clone + Eq> State<T> {
         // OP_PICK X
         //
         // [α X β] → [α X β X]
-        if let Some((bottom, [Some(top0)])) = self.target.split_last_chunk() {
+        if let Some((bottom, &[Some(top0)])) = self.target.split_last_chunk() {
             children.push(
                 self.make_child(
-                    StackOp::Pick(top0.clone()),
+                    StackOp::Pick(top0),
                     Vec::from(bottom),
-                    [Above::Push(top0.clone())]
+                    [Above::Push(top0)]
                         .into_iter()
-                        .chain(self.above.iter().cloned())
+                        .chain(self.above.iter().copied())
                         .collect(),
                 ),
             );
@@ -458,14 +518,14 @@ impl<T: Clone + Eq> State<T> {
         // 1) X is taken from inside target (spawn one child for each position)
         // 2) X is taken from outside target (spawn one extra child; consider this when extending target _ in future steps)
         //
-        // if let Some((bottom, [Some(top0)])) = self.target.split_last_chunk() {
+        // if let Some((bottom, &[Some(top0)])) = self.target.split_last_chunk() {
         //     children.push(
         //         self.make_child(
-        //             StackOp::Pick(top0.clone()),
+        //             StackOp::Pick(top0),
         //             Vec::from(bottom),
-        //             [Above::Push(top0.clone())]
+        //             [Above::Push(top0)]
         //                 .into_iter()
-        //                 .chain(self.above.iter().cloned())
+        //                 .chain(self.above.iter().copied())
         //                 .collect(),
         //         ),
         //     );
@@ -612,7 +672,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn find_transformation_regression1() {
         let source = &[235, 154, 0, 46, 255];
         let target = &[255, 235, 154, 0, 0, 0, 0, 0, 0, 0];
@@ -787,7 +846,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn transformation_is_optimal_3_1() {
         for top0 in 0..3 {
             for top1 in 0..3 {
@@ -803,7 +861,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn transformation_is_optimal_3_2() {
         for top0 in 0..3 {
             for top1 in 0..3 {

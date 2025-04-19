@@ -21,20 +21,20 @@ pub const fn split_last_chunk<const N: usize, T>(s: &[T]) -> (&[T], [Option<&T>;
 }
 
 /// Similar to [`std::slice::split_last_chunk`], but replace missing elements with `None`.
-pub const fn split_last_chunk2<const N: usize, T>(
+pub const fn split_last_chunk2<const N: usize, T: Copy>(
     s: &[Option<T>],
-) -> (&[Option<T>], [Option<&T>; N]) {
+) -> (&[Option<T>], [Option<T>; N]) {
     let front = match s.split_last_chunk::<N>() {
         Some((front, _)) => front,
         None => &[],
     };
-    let mut last_chunk: [Option<&T>; N] = [None; N];
+    let mut last_chunk: [Option<T>; N] = [None; N];
 
     let mut i = 0;
     while i < N {
         let index = s.len().wrapping_sub(1).wrapping_sub(i);
         last_chunk[N - 1 - i] = match index < s.len() {
-            true => s[index].as_ref(),
+            true => s[index],
             false => None,
         };
         i += 1;
