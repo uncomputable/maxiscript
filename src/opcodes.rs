@@ -1,6 +1,4 @@
 use crate::util;
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 use std::fmt;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -56,6 +54,10 @@ impl<T> StackOp<T> {
     }
 }
 
+fn script_cost<T>(script: &[StackOp<T>]) -> usize {
+    script.iter().map(StackOp::cost).sum()
+}
+
 // TODO: Copy some elements, move other elements
 // TODO: result stack: allow change of order below target (enables smaller scripts?)
 /// Computes a minimal Bitcoin script that puts the `target` on top of the `source` stack.
@@ -84,28 +86,38 @@ pub fn find_shortest_transformation<T: Clone + Ord + fmt::Debug + std::hash::Has
     }
 
     let initial_state = State::new(target.to_vec());
-    let mut priority_queue = BinaryHeap::from([initial_state]);
+    let mut queue_n_plus_0 = vec![initial_state];
+    let mut queue_n_plus_1 = Vec::new();
+    let mut script_bytes = 0;
 
-    while let Some(state) = priority_queue.pop() {
+    loop {
         // Termination is guaranteed
         debug_assert!(
-            state.script_bytes <= target.len() * 2,
-            "maximum transformation cost should be 2 times target size (using OP_PICK)"
+            script_bytes <= target.len() * 2,
+            "maximum transformation cost should be 2 times target size (using OP_PICK or OP_ROLL)"
         );
+        let mut queue_n_plus_2 = Vec::new();
 
-        // Bail out if we produced more than the target
-        if target.len() < state.above.len() {
-            continue;
+        for state in queue_n_plus_0 {
+            debug_assert_eq!(script_bytes, script_cost(&state.script));
+            // println!("{:?}", state.script);
+
+            // Bail out if we produced more than the target
+            if target.len() < state.above.len() {
+                continue;
+            }
+            if state.matches(source, target) {
+                return Some(state.script);
+            }
+
+            queue_n_plus_1.extend(state.reverse_apply1());
+            queue_n_plus_2.extend(state.reverse_apply2());
         }
 
-        if state.matches(source, target) {
-            return Some(state.script);
-        }
-
-        priority_queue.extend(state.reverse_apply());
+        queue_n_plus_0 = queue_n_plus_1;
+        queue_n_plus_1 = queue_n_plus_2;
+        script_bytes += 1;
     }
-
-    unreachable!("loop is infinite and will panic after too many steps")
 }
 
 fn unify<'a, T: Eq>(a: Option<&'a T>, b: Option<&'a T>) -> Option<&'a T> {
@@ -126,7 +138,6 @@ enum Above<T> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct State<T> {
-    script_bytes: usize,
     script: Vec<StackOp<T>>,
     /// Stack elements that are required to reach this state.
     ///
@@ -141,7 +152,6 @@ struct State<T> {
 impl<T> State<T> {
     pub fn new(target: Vec<T>) -> Self {
         Self {
-            script_bytes: 0,
             script: vec![],
             target: target.into_iter().map(Some).collect(),
             above: Vec::new(),
@@ -156,6 +166,7 @@ impl<T: Clone + Eq> State<T> {
         for op in &self.above {
             match op {
                 Above::Push(x) => above.push(x),
+                // TODO: Allow target to merge with source stack, in case of moved variables
                 Above::Tuck => {
                     if above.len() < 2 {
                         return false;
@@ -183,7 +194,6 @@ impl<T: Clone + Eq> State<T> {
 
     fn make_child(&self, op: StackOp<T>, target: Vec<Option<T>>, above: Vec<Above<T>>) -> Self {
         State {
-            script_bytes: self.script_bytes + op.cost(),
             script: std::iter::once(op)
                 .chain(self.script.iter().cloned())
                 .collect(),
@@ -199,7 +209,7 @@ impl<T: Clone + Eq> State<T> {
     /// For the present state `S`,
     /// if there is a state `T` with transition `T → S`,
     /// then include `T` in the output.
-    pub fn reverse_apply(&self) -> Vec<Self> {
+    pub fn reverse_apply1(&self) -> Vec<Self> {
         let mut children = Vec::new();
 
         // OP_DUP
@@ -359,6 +369,64 @@ impl<T: Clone + Eq> State<T> {
             );
         }
 
+        // // OP_SWAP
+        // //
+        // // [α 1 0] → [α 0 1]
+        // if let Some((bottom, [top0, top1])) = self.target.split_last_chunk() {
+        //     children.push(
+        //         self.make_child(
+        //             StackOp::Swap,
+        //             bottom.iter().chain([top1, top0]).cloned().collect(),
+        //             self.above.clone(),
+        //         ),
+        //     );
+        // }
+        //
+        // // OP_2SWAP
+        // //
+        // // [α 3 2 1 0] → [α 1 0 3 2]
+        // if let Some((bottom, [top1, top0, top3, top2])) = self.target.split_last_chunk() {
+        //     children.push(
+        //         self.make_child(
+        //             StackOp::_2Swap,
+        //             bottom.iter().chain([top3, top2, top1, top0]).cloned().collect(),
+        //             self.above.clone(),
+        //         ),
+        //     );
+        // }
+        //
+        // // OP_ROT
+        // //
+        // // [α 2 1 0] → [α 1 0 2]
+        // if let Some((bottom, [top1, top0, top2])) = self.target.split_last_chunk() {
+        //     children.push(
+        //         self.make_child(
+        //             StackOp::Rot,
+        //             bottom.iter().chain([top2, top1, top0]).cloned().collect(),
+        //             self.above.clone(),
+        //         ),
+        //     );
+        // }
+        //
+        // // OP_2ROT
+        // //
+        // // [α 5 4 3 2 1 0] → [α 3 2 1 0 5 4]
+        // if let Some((bottom, [top3, top2, top1, top0, top5, top4])) = self.target.split_last_chunk() {
+        //     children.push(
+        //         self.make_child(
+        //             StackOp::_2Rot,
+        //             bottom.iter().chain([top5, top4, top3, top2, top1, top0]).cloned().collect(),
+        //             self.above.clone(),
+        //         ),
+        //     );
+        // }
+
+        children
+    }
+
+    pub fn reverse_apply2(&self) -> Vec<Self> {
+        let mut children = Vec::new();
+
         // OP_PICK X
         //
         // [α X β] → [α X β X]
@@ -371,58 +439,6 @@ impl<T: Clone + Eq> State<T> {
                         .into_iter()
                         .chain(self.above.iter().cloned())
                         .collect(),
-                ),
-            );
-        }
-
-        // OP_SWAP
-        //
-        // [α 1 0] → [α 0 1]
-        if let Some((bottom, [top0, top1])) = self.target.split_last_chunk() {
-            children.push(
-                self.make_child(
-                    StackOp::Swap,
-                    bottom.iter().chain([top1, top0]).cloned().collect(),
-                    self.above.clone(),
-                ),
-            );
-        }
-
-        // OP_2SWAP
-        //
-        // [α 3 2 1 0] → [α 1 0 3 2]
-        if let Some((bottom, [top1, top0, top3, top2])) = self.target.split_last_chunk() {
-            children.push(
-                self.make_child(
-                    StackOp::_2Swap,
-                    bottom.iter().chain([top3, top2, top1, top0]).cloned().collect(),
-                    self.above.clone(),
-                ),
-            );
-        }
-
-        // OP_ROT
-        //
-        // [α 2 1 0] → [α 1 0 2]
-        if let Some((bottom, [top1, top0, top2])) = self.target.split_last_chunk() {
-            children.push(
-                self.make_child(
-                    StackOp::Rot,
-                    bottom.iter().chain([top2, top1, top0]).cloned().collect(),
-                    self.above.clone(),
-                ),
-            );
-        }
-
-        // OP_2ROT
-        //
-        // [α 5 4 3 2 1 0] → [α 3 2 1 0 5 4]
-        if let Some((bottom, [top3, top2, top1, top0, top5, top4])) = self.target.split_last_chunk() {
-            children.push(
-                self.make_child(
-                    StackOp::_2Rot,
-                    bottom.iter().chain([top5, top4, top3, top2, top1, top0]).cloned().collect(),
-                    self.above.clone(),
                 ),
             );
         }
@@ -459,21 +475,8 @@ impl<T: Clone + Eq> State<T> {
     }
 }
 
-impl<T: Ord> PartialOrd for State<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(other.cmp(self)) // reversed to turn max heap into min heap
-    }
-}
-
-impl<T: Ord> Ord for State<T> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.script_bytes.cmp(&other.script_bytes) // ordered by cost (number of script bytes)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use super::*;
     use itertools::{repeat_n, Itertools};
 
@@ -635,7 +638,7 @@ mod tests {
         let target = &[0, 1, 0];
         let script = find_shortest_transformation(source, target).unwrap();
         assert_eq!(
-            &[StackOp::Over, StackOp::Pick(0), StackOp::Tuck,],
+            &[StackOp::Over, StackOp::Pick(0), StackOp::Tuck],
             script.as_slice()
         )
     }
@@ -648,10 +651,10 @@ mod tests {
             StackOp::Over,
             StackOp::_2Over,
             StackOp::Tuck,
-            StackOp::Swap,
-            StackOp::_2Swap,
-            StackOp::Rot,
-            StackOp::_2Rot,
+            // StackOp::Swap,
+            // StackOp::_2Swap,
+            // StackOp::Rot,
+            // StackOp::_2Rot,
         ]
         .into_iter()
         .chain(target.iter().copied().map(StackOp::Pick))
@@ -691,19 +694,15 @@ mod tests {
     //     outer
     // });
 
-    fn script_cost(script: &Script) -> usize {
-        script.iter().map(StackOp::cost).sum()
-    }
-
-    fn multiset<T: Eq + std::hash::Hash>(s: &[T]) -> HashMap<&T, usize> {
-        let mut counts = HashMap::new();
-
-        for item in s {
-            *counts.entry(item).or_insert(0) += 1;
-        }
-
-        counts
-    }
+    // fn multiset<T: Eq + std::hash::Hash>(s: &[T]) -> HashMap<&T, usize> {
+    //     let mut counts = HashMap::new();
+    //
+    //     for item in s {
+    //         *counts.entry(item).or_insert(0) += 1;
+    //     }
+    //
+    //     counts
+    // }
 
     fn script_is_functional_copy(source: &[usize], target: &[usize], script: &Script) -> bool {
         let mut final_stack = Vec::from(source);
@@ -711,7 +710,9 @@ mod tests {
         result.is_ok()
             && source.len() + target.len() == final_stack.len()
             && target == &final_stack[source.len()..] // match target precisely
-            && multiset(&final_stack[..source.len()]) == multiset(source) // match source without respect to order
+            && source == &final_stack[..source.len()] // match source precisely
+
+        // && multiset(&final_stack[..source.len()]) == multiset(source) // match source without respect to order
     }
 
     // TODO: Cache optimal scripts

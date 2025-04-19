@@ -146,7 +146,11 @@ fn compile_expr(
                             }
                             StackOp::_2Dup | StackOp::_2Over => pushed_args += 2,
                             StackOp::_3Dup => pushed_args += 3,
-                            StackOp::Swap | StackOp::_2Swap | StackOp::Rot | StackOp::_2Rot | StackOp::Roll(_) => {},
+                            StackOp::Swap
+                            | StackOp::_2Swap
+                            | StackOp::Rot
+                            | StackOp::_2Rot
+                            | StackOp::Roll(_) => {}
                         }
                     }
                 }
