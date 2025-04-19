@@ -120,9 +120,22 @@ fn compile_expr(
                                 script.push_slice(
                                     stack
                                         .position(name, pushed_args)
-                                        .expect("variable definition is checked beforehand"),
+                                        .expect("variable should be defined"),
                                 );
                                 bitcoin::opcodes::all::OP_PICK
+                            }
+                            StackOp::Swap => bitcoin::opcodes::all::OP_SWAP,
+                            StackOp::_2Swap => bitcoin::opcodes::all::OP_2SWAP,
+                            StackOp::Rot => bitcoin::opcodes::all::OP_ROT,
+                            StackOp::_2Rot => bitcoin::opcodes::all::OP_2ROT,
+                            StackOp::Roll(name) => {
+                                // TODO: What if OP_ROLL uses variables inside target?
+                                script.push_slice(
+                                    stack
+                                        .position(name, pushed_args)
+                                        .expect("variable should be defined"),
+                                );
+                                bitcoin::opcodes::all::OP_ROLL
                             }
                         };
                         script.push_opcode(opcode);
@@ -133,6 +146,7 @@ fn compile_expr(
                             }
                             StackOp::_2Dup | StackOp::_2Over => pushed_args += 2,
                             StackOp::_3Dup => pushed_args += 3,
+                            StackOp::Swap | StackOp::_2Swap | StackOp::Rot | StackOp::_2Rot | StackOp::Roll(_) => {},
                         }
                     }
                 }
