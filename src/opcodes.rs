@@ -539,6 +539,7 @@ impl State {
 mod tests {
     use super::*;
     use itertools::{repeat_n, Itertools};
+    use std::sync::{LazyLock, Mutex};
 
     type Script = Vec<StackOp<usize>>;
 
@@ -702,7 +703,8 @@ mod tests {
         )
     }
 
-    fn all_stack_ops(target: &[usize]) -> impl Iterator<Item = StackOp<usize>> + Clone + '_ {
+    fn all_stack_ops(source_len: usize) -> impl Iterator<Item = StackOp<usize>> + Clone {
+        let target_items = 0..source_len;
         [
             StackOp::Dup,
             StackOp::_2Dup,
@@ -716,42 +718,20 @@ mod tests {
             // StackOp::_2Rot,
         ]
         .into_iter()
-        .chain(target.iter().copied().map(StackOp::Pick))
+        .chain(target_items.clone().map(StackOp::Pick))
+        // .chain(target_items.map(StackOp::Roll))
     }
 
-    fn all_copy_scripts(target: &[usize]) -> impl Iterator<Item = Script> + '_ {
-        repeat_n(all_stack_ops(target), target.len())
-            .flatten()
-            .powerset()
+    fn all_copy_scripts(source_len: usize, target_len: usize) -> impl Iterator<Item = Script> {
+        (1..=target_len * 2)
+            .flat_map(move |n| repeat_n(all_stack_ops(source_len), n).multi_cartesian_product())
     }
 
-    // type Stack = Vec<usize>;
-    //
-    // static BEST_SCRIPT: LazyLock<HashMap<Stack, HashMap<Stack, Script>>> = LazyLock::new(|| {
-    //     let mut outer = HashMap::new();
-    //
-    //     for source in repeat_n(0..3, 3).multi_cartesian_product() {
-    //         let mut inner = HashMap::new();
-    //
-    //         for target in repeat_n(0..3, 3).multi_cartesian_product() {
-    //             let mut best_script = Vec::default();
-    //             let mut best_cost = usize::MAX;
-    //
-    //             for script in all_copy_scripts(&[0, 1, 2]) {
-    //                 if script_is_functional_copy(&source, &target, &script) && script_cost(&script) < best_cost {
-    //                     best_cost = script_cost(&script);
-    //                     best_script = script;
-    //                 }
-    //             }
-    //
-    //             inner.insert(target.clone(), best_script);
-    //         }
-    //
-    //         outer.insert(source.clone(), inner);
-    //     }
-    //
-    //     outer
-    // });
+    #[test]
+    fn iterator_sanity_check() {
+        assert_eq!(9, all_stack_ops(3).count());
+        assert_eq!(597870, all_copy_scripts(3, 3).count());
+    }
 
     // fn multiset<T: Eq + std::hash::Hash>(s: &[T]) -> HashMap<&T, usize> {
     //     let mut counts = HashMap::new();
@@ -764,7 +744,8 @@ mod tests {
     // }
 
     fn script_is_functional_copy(source: &[usize], target: &[usize], script: &Script) -> bool {
-        let mut final_stack = Vec::from(source);
+        let mut final_stack = Vec::with_capacity(source.len() + target.len());
+        final_stack.extend(source);
         let result = run_script(&mut final_stack, script);
         result.is_ok()
             && source.len() + target.len() == final_stack.len()
@@ -774,23 +755,56 @@ mod tests {
         // && multiset(&final_stack[..source.len()]) == multiset(source) // match source without respect to order
     }
 
-    // TODO: Cache optimal scripts
+    // fn get_target_of_script(source: &[usize], script: &Script) -> Option<Vec<usize>> {
+    //     let mut final_stack = Vec::with_capacity(source.len());
+    //     final_stack.extend(source);
+    //     let result = run_script(&mut final_stack, script);
+    //
+    //     if result.is_ok()
+    //         && source.len() < final_stack.len()
+    //         && source == &final_stack[..source.len()]
+    //     {
+    //         Some(final_stack.split_off(source.len()))
+    //     } else {
+    //         None
+    //     }
+    // }
+
     fn script_is_shortest_copy(
         source: &[usize],
         target: &[usize],
         script: &Script,
     ) -> Result<(), Script> {
-        // let best_script = BEST_SCRIPT.get(source).unwrap().get(target).unwrap();
-        // if script_cost(&best_script) < script_cost(script) {
-        //     return Err(best_script.clone());
-        // }
+        let cost = script_cost(script);
+        let script_key = (source.to_vec(), target.to_vec());
 
-        for other_script in all_copy_scripts(target) {
-            if script_cost(&other_script) < script_cost(script)
-                && script_is_functional_copy(source, target, &other_script)
+        static OPTIMAL_SCRIPTS: LazyLock<
+            Mutex<HashMap<(Vec<usize>, Vec<usize>), (Script, usize)>>,
+        > = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+        let mut cache = OPTIMAL_SCRIPTS.lock().unwrap();
+
+        if !cache.contains_key(&script_key) {
+            let mut best_cost = usize::MAX;
+            let mut best_script = Vec::new();
+
+            for other_script in all_copy_scripts(source.len(), target.len())
+                .filter(|s| script_is_functional_copy(source, target, s))
             {
-                return Err(other_script);
+                let other_cost = script_cost(&other_script);
+                if other_cost < best_cost {
+                    best_cost = other_cost;
+                    best_script = other_script;
+                }
             }
+
+            debug_assert!(best_cost < usize::MAX, "there should be a best script");
+            cache.insert(script_key.clone(), (best_script, best_cost));
+        }
+
+        let (best_script, best_cost) = cache.get(&script_key).unwrap();
+        if *best_cost < cost {
+            return Err(best_script.clone());
         }
 
         Ok(())
@@ -810,11 +824,6 @@ mod tests {
                 panic!("Other script is better: {other_script:?}");
             }
         }
-    }
-
-    #[test]
-    fn size_above() {
-        assert_eq!(2, size_of::<Above<u8>>());
     }
 
     #[test]
