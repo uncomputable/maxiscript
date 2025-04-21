@@ -1,8 +1,7 @@
-extern crate core;
-
-use crate::parse::{lexer, program_parser, Program, Span, Spanned, Token};
-use chumsky::prelude::{Input, Rich};
 use chumsky::Parser;
+use chumsky::prelude::{Input, Rich};
+
+use crate::parse::{Program, Span, Spanned, Token, lexer, program_parser};
 
 mod compile;
 mod opcodes;

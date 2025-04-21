@@ -1,7 +1,8 @@
-use crate::util;
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZero;
+
+use crate::util;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StackOp<T> {
@@ -538,7 +539,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use itertools::{repeat_n, Itertools};
+    use itertools::{Itertools, repeat_n};
     use std::sync::{LazyLock, Mutex};
 
     type Script = Vec<StackOp<usize>>;

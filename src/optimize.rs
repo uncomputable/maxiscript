@@ -1,6 +1,8 @@
-use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+
+use itertools::Itertools;
+use log::error;
 
 struct State {
     /// Path of nodes from smallest to greatest.
@@ -28,12 +30,20 @@ impl State {
             .path
             .iter()
             .all(|node| !self.greater_than.contains_key(node));
+        if !is_disjoint {
+            error!("given relation is not disjoint");
+            return false;
+        };
         let has_all_keys = self.greater_than.values().all(|smaller_nodes| {
             smaller_nodes
                 .iter()
                 .all(|smaller_node| self.greater_than.contains_key(smaller_node))
         });
-        is_disjoint && has_all_keys
+        if !has_all_keys {
+            error!("given relation doesn't have all keys");
+            return false;
+        };
+        true
     }
 
     /// Creates a state from the given `greater_than` relation.

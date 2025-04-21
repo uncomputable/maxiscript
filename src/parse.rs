@@ -4,9 +4,9 @@ use std::sync::Arc;
 use bitcoin::script::PushBytesBuf;
 use chumsky::input::ValueInput;
 use chumsky::prelude::{
-    any, end, just, one_of, skip_then_retry_until, IterParser, Rich, SimpleSpan,
+    IterParser, Rich, SimpleSpan, any, end, just, one_of, skip_then_retry_until,
 };
-use chumsky::{extra, select, text, Parser};
+use chumsky::{Parser, extra, select, text};
 use hex_conservative::{DisplayHex, FromHex};
 
 pub type Span = SimpleSpan;
@@ -35,8 +35,8 @@ impl fmt::Display for Token<'_> {
     }
 }
 
-pub fn lexer<'src>(
-) -> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, Span>>> {
+pub fn lexer<'src>()
+-> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, Span>>> {
     let hex = just("0x")
         .ignore_then(
             one_of("0123456789abcdefABCDEF")
@@ -81,9 +81,9 @@ pub struct Program<'src> {
     statements: Arc<[Statement<'src>]>,
 }
 
-impl Program<'_> {
+impl<'src> Program<'src> {
     /// Accesses the statements of the program.
-    pub fn statements(&self) -> &Arc<[Statement]> {
+    pub fn statements(&self) -> &Arc<[Statement<'src>]> {
         &self.statements
     }
 }
@@ -91,7 +91,7 @@ impl Program<'_> {
 impl fmt::Display for Program<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, stmt) in self.statements().iter().enumerate() {
-            write!(f, "{stmt};")?;
+            write!(f, "{stmt}")?;
             if index < self.statements().len() - 1 {
                 writeln!(f)?;
             }
@@ -112,8 +112,8 @@ pub enum Statement<'src> {
 impl fmt::Display for Statement<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Statement::Assignment(ass) => write!(f, "{ass}"),
-            Statement::UnitExpr(expr) => write!(f, "{expr}"),
+            Statement::Assignment(ass) => write!(f, "{ass};"),
+            Statement::UnitExpr(expr) => write!(f, "{expr};"),
         }
     }
 }
@@ -251,8 +251,8 @@ impl fmt::Display for OpcodeName {
     }
 }
 
-pub fn program_parser<'src, I>(
-) -> impl Parser<'src, I, Program<'src>, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
+pub fn program_parser<'src, I>()
+-> impl Parser<'src, I, Program<'src>, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -287,8 +287,8 @@ where
         })
 }
 
-fn expr_parser<'src, I>(
-) -> impl Parser<'src, I, Spanned<Expression<'src>>, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
+fn expr_parser<'src, I>()
+-> impl Parser<'src, I, Spanned<Expression<'src>>, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
@@ -311,8 +311,8 @@ where
     var.or(hex).or(call)
 }
 
-fn call_parser<'src, I>(
-) -> impl Parser<'src, I, Spanned<Expression<'src>>, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
+fn call_parser<'src, I>()
+-> impl Parser<'src, I, Spanned<Expression<'src>>, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {

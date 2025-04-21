@@ -1,6 +1,12 @@
-use crate::opcodes::{find_shortest_transformation, StackOp};
-use crate::parse::{Expression, Program, Statement, VariableName};
+use std::collections::HashMap;
+
 use bitcoin::script::PushBytes;
+use itertools::Itertools;
+use log::{Level, debug, log_enabled};
+
+use crate::opcodes::{StackOp, find_shortest_transformation};
+use crate::optimize;
+use crate::parse::{Expression, Program, Statement, VariableName};
 
 #[derive(Debug, Clone, Default)]
 struct Stack<'src> {
@@ -64,29 +70,87 @@ impl<'src> Stack<'src> {
     }
 }
 
-pub fn compile(program: Program) -> Result<bitcoin::ScriptBuf, String> {
-    let mut script = bitcoin::ScriptBuf::new();
-    let mut stack = Stack::default();
+fn get_statement_dependencies<'a, 'src>(
+    program: &'a Program<'src>,
+) -> HashMap<&'a Statement<'src>, Vec<&'a Statement<'src>>> {
+    let mut var_defined_in = HashMap::new();
+    let mut depends_on = HashMap::new();
 
     for statement in program.statements().iter() {
-        match statement {
+        let expr = match statement {
             Statement::Assignment(ass) => {
-                compile_expr(ass.expression(), &mut script, &mut stack)?;
-                stack.push_variable(ass.assignee())?;
+                var_defined_in.insert(ass.assignee(), statement);
+                ass.expression()
             }
-            Statement::UnitExpr(expr) => match expr {
-                Expression::Variable(..) | Expression::Bytes(..) => {
-                    return Err("Expression is not unit".to_string())
-                }
-                Expression::Call(call) if !call.name().is_unit() => {
-                    return Err("Expression is not unit".to_string())
-                }
-                _ => compile_expr(expr, &mut script, &mut stack)?,
-            },
+            Statement::UnitExpr(expr) => expr,
+        };
+        match expr {
+            Expression::Variable(x) => {
+                let &stmt_x = var_defined_in.get(x).expect("var defined");
+                depends_on.insert(statement, vec![stmt_x]);
+            }
+            Expression::Call(call) => {
+                let stmts = call
+                    .args_target()
+                    .iter()
+                    .map(|var| *var_defined_in.get(var).expect("var defined"))
+                    .collect();
+                depends_on.insert(statement, stmts);
+            }
+            Expression::Bytes(_) => {
+                depends_on.insert(statement, vec![]);
+            }
         }
     }
 
-    Ok(script)
+    depends_on
+}
+
+pub fn compile(program: Program) -> Result<bitcoin::ScriptBuf, String> {
+    let depends_on = get_statement_dependencies(&program);
+
+    let mut best_script = bitcoin::ScriptBuf::new();
+    let mut best_len = usize::MAX;
+
+    for ordered_statements in optimize::all_topological_orders(&depends_on) {
+        let mut script = bitcoin::ScriptBuf::new();
+        let mut stack = Stack::default();
+
+        for statement in ordered_statements.iter() {
+            match statement {
+                Statement::Assignment(ass) => {
+                    compile_expr(ass.expression(), &mut script, &mut stack)?;
+                    stack.push_variable(ass.assignee())?;
+                }
+                Statement::UnitExpr(expr) => match expr {
+                    Expression::Variable(..) | Expression::Bytes(..) => {
+                        return Err("Expression is not unit".to_string());
+                    }
+                    Expression::Call(call) if !call.name().is_unit() => {
+                        return Err("Expression is not unit".to_string());
+                    }
+                    _ => compile_expr(expr, &mut script, &mut stack)?,
+                },
+            }
+        }
+
+        if script.len() < best_len {
+            best_len = script.len();
+            best_script = script;
+
+            if log_enabled!(Level::Debug) {
+                debug!(
+                    "Found better statement order:\n{}",
+                    ordered_statements
+                        .iter()
+                        .map(|stmt| stmt.to_string())
+                        .join("\n")
+                )
+            }
+        }
+    }
+
+    Ok(best_script)
 }
 
 fn compile_expr(

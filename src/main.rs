@@ -1,8 +1,14 @@
-use ariadne::{sources, Color, Label, Report, ReportKind};
-use bitfony::{compile, lex_program, parse_program};
 use std::{env, fs};
 
+use ariadne::{Color, Label, Report, ReportKind, sources};
+use bitfony::{compile, lex_program, parse_program};
+use log::info;
+
 fn main() {
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Debug)
+        .init();
+
     let filename = env::args().nth(1).expect("Expected file argument");
     let src = fs::read_to_string(&filename).expect("Failed to read file");
 
@@ -14,9 +20,9 @@ fn main() {
     };
 
     if let Some(program) = program {
-        println!("{program}");
+        info!("Compiling Bitfony program:\n{program}");
         let script = compile(program).expect("should compile");
-        println!("{script:?}");
+        info!("Resulting Bitcoin script:\n{script:?}");
     }
 
     lex_errs
