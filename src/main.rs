@@ -2,6 +2,7 @@ use std::{env, fs};
 
 use ariadne::{Color, Label, Report, ReportKind, sources};
 use bitfony::{compile, lex_program, parse_program};
+use hex_conservative::DisplayHex;
 use log::info;
 
 fn main() {
@@ -23,6 +24,7 @@ fn main() {
         info!("Compiling Bitfony program:\n{program}");
         let script = compile(program).expect("should compile");
         info!("Resulting Bitcoin script:\n{script:?}");
+        println!("{}", script.as_bytes().to_lower_hex_string());
     }
 
     lex_errs

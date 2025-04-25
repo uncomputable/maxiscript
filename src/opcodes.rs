@@ -785,6 +785,10 @@ mod tests {
 
         let mut cache = OPTIMAL_SCRIPTS.lock().unwrap();
 
+        // TODO: Each script needs to be run once per source len:
+        // Source [2, 1, 0] -script-> [i, j, k] where i, j, k in {0, 1, 2}
+        // Script can be checked to leave source stack constant
+        // Output of script can be mapped according to mapping of source
         if !cache.contains_key(&script_key) {
             let mut best_cost = usize::MAX;
             let mut best_script = Vec::new();
