@@ -113,11 +113,10 @@ fn apply_map<S: Eq + std::hash::Hash, T: Clone>(
 }
 
 // TODO: Copy some elements, move other elements
-// TODO: result stack: allow change of order below target (enables smaller scripts?)
 /// Computes a minimal Bitcoin script that puts the `target` on top of the `source` stack.
 ///
 /// After applying the script, the result stack consists of the `source` stack
-/// (exactly the same order and number of elements) with the `target` on top.
+/// (same list of items in arbitrary order) with the `target` (exact order) on top.
 ///
 /// This function returns `None` if there is no transformation script.
 /// This is the case if the `source` stack is missing elements that exist in the `target`.
@@ -202,7 +201,7 @@ const fn unify(a: Option<Id>, b: Option<Id>) -> Option<Id> {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 enum Above<T> {
     Push(T),
-    Tuck,
+    Tuck(T),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -232,12 +231,27 @@ impl State {
         let mut above = Vec::with_capacity(target.len());
         for op in self.above.iter().copied() {
             match op {
-                Above::Push(x) => above.push(x),
-                // TODO: Allow target to merge with source stack, in case of moved variables
-                Above::Tuck => {
-                    if above.len() < 2 {
+                Above::Push(x) => {
+                    above.push(x);
+                }
+                Above::Tuck(x) => {
+                    // OP_TUCK can be used to copy stack item `0`
+                    // while swapping items `0` and `1` in the source stack.
+                    // A consecutive OP_OVER can make use of the swapped stack.
+                    //
+                    // [1 0 | ] -TUCK-> [0 1 | 0] -OVER-> [0 1 | 0 1]
+                    if above.len() == 0 {
+                        above.push(x);
+                        continue;
+                    }
+                    // TODO: Allow moved items
+                    // `1` is a moved item.
+                    //
+                    // [2 1 | 0] -TUCK-> [2 0 | 1 0]
+                    if above.len() == 1 {
                         return false;
                     }
+
                     let last = *above.last().unwrap();
                     let i = above.len() - 1;
                     let j = above.len() - 2;
@@ -247,7 +261,6 @@ impl State {
             }
         }
 
-        // TODO: Allow target to merge with source stack, in case of moved variables
         if target != above {
             return false;
         }
@@ -416,7 +429,7 @@ impl State {
                 self.make_child(
                     StackOp::Tuck,
                     bottom.iter().copied().chain([top1, Some(top0)]).collect(),
-                    [Above::Tuck]
+                    [Above::Tuck(top0)]
                         .into_iter()
                         .chain(self.above.iter().copied())
                         .collect(),
@@ -734,15 +747,15 @@ mod tests {
         assert_eq!(597870, all_copy_scripts(3, 3).count());
     }
 
-    // fn multiset<T: Eq + std::hash::Hash>(s: &[T]) -> HashMap<&T, usize> {
-    //     let mut counts = HashMap::new();
-    //
-    //     for item in s {
-    //         *counts.entry(item).or_insert(0) += 1;
-    //     }
-    //
-    //     counts
-    // }
+    fn multiset<T: Eq + std::hash::Hash>(s: &[T]) -> HashMap<&T, usize> {
+        let mut counts = HashMap::new();
+
+        for item in s {
+            *counts.entry(item).or_insert(0) += 1;
+        }
+
+        counts
+    }
 
     fn script_is_functional_copy(source: &[usize], target: &[usize], script: &Script) -> bool {
         let mut final_stack = Vec::with_capacity(source.len() + target.len());
@@ -751,9 +764,8 @@ mod tests {
         result.is_ok()
             && source.len() + target.len() == final_stack.len()
             && target == &final_stack[source.len()..] // match target precisely
-            && source == &final_stack[..source.len()] // match source precisely
-
-        // && multiset(&final_stack[..source.len()]) == multiset(source) // match source without respect to order
+            // && source == &final_stack[..source.len()] // match source precisely
+            && multiset(&final_stack[..source.len()]) == multiset(source) // match source without respect to order
     }
 
     // fn get_target_of_script(source: &[usize], script: &Script) -> Option<Vec<usize>> {
