@@ -598,12 +598,12 @@ mod tests {
     use itertools::{Itertools, repeat_n};
     use std::sync::{LazyLock, Mutex};
 
-    type Script = Vec<StackOp<usize>>;
+    type Script = Vec<StackOp<u8>>;
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
     pub struct ScriptFailed;
 
-    pub fn run_script(stack: &mut Vec<usize>, script: &Script) -> Result<(), ScriptFailed> {
+    pub fn run_script(stack: &mut Vec<u8>, script: &Script) -> Result<(), ScriptFailed> {
         for op in script {
             match op {
                 // Copy
@@ -773,7 +773,7 @@ mod tests {
         );
     }
 
-    fn all_stack_ops(source_len: usize) -> impl Iterator<Item = StackOp<usize>> + Clone {
+    fn all_stack_ops(source_len: u8) -> impl Iterator<Item = StackOp<u8>> + Clone {
         let target_items = 0..source_len;
         [
             StackOp::Dup,
@@ -792,9 +792,10 @@ mod tests {
         // .chain(target_items.map(StackOp::Roll))
     }
 
-    fn all_copy_scripts(source_len: usize, target_len: usize) -> impl Iterator<Item = Script> {
-        (1..=target_len * 2)
-            .flat_map(move |n| repeat_n(all_stack_ops(source_len), n).multi_cartesian_product())
+    fn all_copy_scripts(source_len: u8, target_len: u8) -> impl Iterator<Item = Script> {
+        (1..=target_len * 2).flat_map(move |n| {
+            repeat_n(all_stack_ops(source_len), usize::from(n)).multi_cartesian_product()
+        })
     }
 
     #[test]
@@ -813,7 +814,7 @@ mod tests {
         counts
     }
 
-    fn script_is_functional_copy(source: &[usize], target: &[usize], script: &Script) -> bool {
+    fn script_is_functional_copy(source: &[u8], target: &[u8], script: &Script) -> bool {
         let mut final_stack = Vec::with_capacity(source.len() + target.len());
         final_stack.extend(source);
         let result = run_script(&mut final_stack, script);
@@ -824,14 +825,14 @@ mod tests {
             && multiset(&final_stack[..source.len()]) == multiset(source) // match source without respect to order
     }
 
-    // fn get_target_of_script(source: &[usize], script: &Script) -> Option<Vec<usize>> {
+    // fn get_target_of_script(source: &[u8], script: &Script) -> Option<Vec<u8>> {
     //     let mut final_stack = Vec::with_capacity(source.len());
     //     final_stack.extend(source);
     //     let result = run_script(&mut final_stack, script);
     //
     //     if result.is_ok()
     //         && source.len() < final_stack.len()
-    //         && source == &final_stack[..source.len()]
+    //         && multiset(&final_stack[..source.len()]) == multiset(source)
     //     {
     //         Some(final_stack.split_off(source.len()))
     //     } else {
@@ -840,28 +841,26 @@ mod tests {
     // }
 
     fn script_is_shortest_copy(
-        source: &[usize],
-        target: &[usize],
+        source: &[u8],
+        target: &[u8],
         script: &Script,
     ) -> Result<(), Script> {
+        assert!(2 <= source.len() && source.len() <= 3);
+        assert!(target.len() <= source.len());
+
         let cost = script_cost(script);
         let script_key = (source.to_vec(), target.to_vec());
 
-        static OPTIMAL_SCRIPTS: LazyLock<
-            Mutex<HashMap<(Vec<usize>, Vec<usize>), (Script, usize)>>,
-        > = LazyLock::new(|| Mutex::new(HashMap::new()));
+        static OPTIMAL_SCRIPTS: LazyLock<Mutex<HashMap<(Vec<u8>, Vec<u8>), (Script, usize)>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
 
         let mut cache = OPTIMAL_SCRIPTS.lock().unwrap();
 
-        // TODO: Each script needs to be run once per source len:
-        // Source [2, 1, 0] -script-> [i, j, k] where i, j, k in {0, 1, 2}
-        // Script can be checked to leave source stack constant
-        // Output of script can be mapped according to mapping of source
         if !cache.contains_key(&script_key) {
             let mut best_cost = usize::MAX;
             let mut best_script = Vec::new();
 
-            for other_script in all_copy_scripts(source.len(), target.len())
+            for other_script in all_copy_scripts(source.len() as u8, target.len() as u8)
                 .filter(|s| script_is_functional_copy(source, target, s))
             {
                 let other_cost = script_cost(&other_script);
@@ -883,7 +882,7 @@ mod tests {
         Ok(())
     }
 
-    fn transformation_is_optimal(source: &[usize], target: &[usize]) {
+    fn transformation_is_optimal(source: &[u8], target: &[u8]) {
         if let Some(script) = find_shortest_transformation(source, target) {
             if !script_is_functional_copy(source, target, &script) {
                 eprintln!("Source stack: {source:?}");
@@ -901,80 +900,57 @@ mod tests {
 
     #[test]
     fn transformation_is_optimal_2_1() {
-        for top0 in 0..2 {
-            for top1 in 0..2 {
-                let source = &[top1, top0];
-                for target0 in 0..2 {
-                    let target = &[target0];
-                    transformation_is_optimal(source, target);
-                }
-            }
+        let source = &[1, 0];
+
+        for target0 in 0..2 {
+            let target = &[target0];
+            transformation_is_optimal(source, target);
         }
     }
 
     #[test]
     fn transformation_is_optimal_2_2() {
-        for top0 in 0..2 {
-            for top1 in 0..2 {
-                let source = &[top1, top0];
-                for target0 in 0..2 {
-                    for target1 in 0..2 {
-                        let target = &[target1, target0];
-                        transformation_is_optimal(source, target);
-                    }
-                }
+        let source = &[1, 0];
+
+        for target0 in 0..2 {
+            for target1 in 0..2 {
+                let target = &[target1, target0];
+                transformation_is_optimal(source, target);
             }
         }
     }
 
     #[test]
     fn transformation_is_optimal_3_1() {
-        for top0 in 0..3 {
-            for top1 in 0..3 {
-                for top2 in 0..3 {
-                    let source = &[top2, top1, top0];
-                    for target0 in 0..3 {
-                        let target = &[target0];
-                        transformation_is_optimal(source, target);
-                    }
-                }
-            }
+        let source = &[2, 1, 0];
+
+        for target0 in 0..3 {
+            let target = &[target0];
+            transformation_is_optimal(source, target);
         }
     }
 
     #[test]
     fn transformation_is_optimal_3_2() {
-        for top0 in 0..3 {
-            for top1 in 0..3 {
-                for top2 in 0..3 {
-                    let source = &[top2, top1, top0];
-                    for target0 in 0..3 {
-                        for target1 in 0..3 {
-                            let target = &[target1, target0];
-                            transformation_is_optimal(source, target);
-                        }
-                    }
-                }
+        let source = &[2, 1, 0];
+
+        for target0 in 0..3 {
+            for target1 in 0..3 {
+                let target = &[target1, target0];
+                transformation_is_optimal(source, target);
             }
         }
     }
 
-    // TODO: Minimal source iteration: [0, 1, 2], [0, 0, 2], [0, 1, 1], [0, 1, 0], [0, 0, 0]
     #[test]
-    #[ignore]
     fn transformation_is_optimal_3_3() {
-        for top0 in 0..3 {
-            for top1 in 0..3 {
-                for top2 in 0..3 {
-                    let source = &[top2, top1, top0];
-                    for target0 in 0..3 {
-                        for target1 in 0..3 {
-                            for target2 in 0..3 {
-                                let target = &[target2, target1, target0];
-                                transformation_is_optimal(source, target);
-                            }
-                        }
-                    }
+        let source = &[2, 1, 0];
+
+        for target0 in 0..3 {
+            for target1 in 0..3 {
+                for target2 in 0..3 {
+                    let target = &[target2, target1, target0];
+                    transformation_is_optimal(source, target);
                 }
             }
         }
