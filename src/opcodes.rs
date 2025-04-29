@@ -183,8 +183,8 @@ fn find_shortest_transformation_(source: &[Option<Id>], target: &[Id]) -> Vec<St
                 return state.script;
             }
 
-            queue_n_plus_1.extend(state.reverse_apply1(target));
-            queue_n_plus_2.extend(state.reverse_apply2(target));
+            state.reverse_apply1(&mut queue_n_plus_1, target);
+            state.reverse_apply2(&mut queue_n_plus_2, target);
         }
 
         queue_n_plus_0 = queue_n_plus_1;
@@ -278,9 +278,7 @@ impl State {
     /// For the present state `S`,
     /// if there is a state `T` with transition `T → S`,
     /// then include `T` in the output.
-    pub fn reverse_apply1(&self, target: &[Id]) -> Vec<Self> {
-        let mut children = Vec::new();
-
+    pub fn reverse_apply1(&self, children: &mut Vec<Self>, target: &[Id]) {
         // OP_SWAP
         //
         // [α 1 0] → [α 0 1]
@@ -363,7 +361,7 @@ impl State {
 
         let (above_bottom, &[idx0]) = match self.above.split_last_chunk() {
             Some(x) => x,
-            None => return children,
+            None => return,
         };
 
         // OP_DUP
@@ -420,7 +418,7 @@ impl State {
 
         let (above_bottom, &[idx1, idx0]) = match self.above.split_last_chunk() {
             Some(x) => x,
-            None => return children,
+            None => return,
         };
 
         // OP_2DUP
@@ -474,7 +472,7 @@ impl State {
 
         let (above_bottom, &[idx2, idx1, idx0]) = match self.above.split_last_chunk() {
             Some(x) => x,
-            None => return children,
+            None => return,
         };
 
         // OP_3DUP
@@ -505,16 +503,12 @@ impl State {
                 );
             }
         }
-
-        children
     }
 
-    pub fn reverse_apply2(&self, target: &[Id]) -> Vec<Self> {
-        let mut children = Vec::new();
-
+    pub fn reverse_apply2(&self, children: &mut Vec<Self>, target: &[Id]) {
         let (above_bottom, &[idx0]) = match self.above.split_last_chunk() {
             Some(x) => x,
-            None => return children,
+            None => return,
         };
 
         // OP_PICK X
@@ -557,8 +551,6 @@ impl State {
         //         ),
         //     );
         // }
-
-        children
     }
 }
 
