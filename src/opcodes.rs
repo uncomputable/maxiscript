@@ -177,12 +177,12 @@ fn find_shortest_transformation_(source: &[Option<Id>], target: &[Id]) -> Vec<St
             //     dbg!(&state);
             // }
 
-            if state.matches(source, target) {
+            if state.matches(source) {
                 return state.script;
             }
 
-            queue_n_plus_1.extend(state.reverse_apply1());
-            queue_n_plus_2.extend(state.reverse_apply2());
+            queue_n_plus_1.extend(state.reverse_apply1(target));
+            queue_n_plus_2.extend(state.reverse_apply2(target));
         }
 
         queue_n_plus_0 = queue_n_plus_1;
@@ -200,17 +200,6 @@ const fn unify(a: Option<Id>, b: Option<Id>) -> Option<Id> {
     }
 }
 
-/// Pseudo script for computing stack top.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-enum Above<T> {
-    Push(T),
-    Tuck(T),
-    Swap,
-    _2Swap,
-    Rot,
-    _2Rot,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct State {
     script: Vec<StackOp<Id>>,
@@ -221,7 +210,7 @@ struct State {
     /// Produced stack elements above target.
     ///
     /// The stack elements are encoded in a pseudo script.
-    above: Vec<Above<Id>>,
+    above: Vec<usize>,
 }
 
 impl State {
@@ -229,63 +218,13 @@ impl State {
         Self {
             script: vec![],
             target: target.iter().copied().map(Some).collect(),
-            above: Vec::new(),
+            above: (0..target.len()).collect(),
         }
     }
 
     /// Checks if the state matches the given `source` stack and the given `target` stack top.
-    pub fn matches(&self, source: &[Option<Id>], target: &[Id]) -> bool {
-        let mut above = Vec::with_capacity(target.len());
-
-        // if let &[StackOp::_2Dup, StackOp::Over, StackOp::Swap] = self.script.as_slice() {
-        //     dbg!(&above);
-        //     dbg!(target);
-        // }
-
-        for op in self.above.iter().copied() {
-            match op {
-                Above::Push(x) => {
-                    above.push(x);
-                }
-                Above::Tuck(x) => {
-                    // OP_TUCK can be used to copy stack item `0`
-                    // while swapping items `0` and `1` in the source stack.
-                    // A consecutive OP_OVER can make use of the swapped stack.
-                    //
-                    // [1 0 | ] -TUCK-> [0 1 | 0] -OVER-> [0 1 | 0 1]
-                    #[allow(clippy::len_zero)]
-                    if above.len() == 0 {
-                        above.push(x);
-                        continue;
-                    }
-                    // TODO: Allow moved items
-                    // `1` is a moved item.
-                    //
-                    // [2 1 | 0] -TUCK-> [2 0 | 1 0]
-                    if above.len() == 1 {
-                        return false;
-                    }
-
-                    let last = *above.last().unwrap();
-                    let i = above.len() - 1;
-                    let j = above.len() - 2;
-                    above.swap(i, j);
-                    above.push(last);
-                }
-                Above::Swap => {
-                    // TODO: Allow moved items
-                    if above.len() < 2 {
-                        return false;
-                    }
-                    let i = above.len() - 1;
-                    let j = above.len() - 2;
-                    above.swap(i, j);
-                }
-                _ => unimplemented!(),
-            }
-        }
-
-        if target != above {
+    pub fn matches(&self, source: &[Option<Id>]) -> bool {
+        if !self.above.is_empty() {
             return false;
         }
 
@@ -301,7 +240,7 @@ impl State {
                 })
     }
 
-    fn make_child(&self, op: StackOp<Id>, target: Vec<Option<Id>>, above: Vec<Above<Id>>) -> Self {
+    fn make_child(&self, op: StackOp<Id>, target: Vec<Option<Id>>, above: Vec<usize>) -> Self {
         State {
             script: std::iter::once(op)
                 .chain(self.script.iter().copied())
@@ -318,8 +257,13 @@ impl State {
     /// For the present state `S`,
     /// if there is a state `T` with transition `T → S`,
     /// then include `T` in the output.
-    pub fn reverse_apply1(&self) -> Vec<Self> {
+    pub fn reverse_apply1(&self, target: &[Id]) -> Vec<Self> {
         let mut children = Vec::new();
+
+        let (above_bottom, &[idx0]) = match self.above.split_last_chunk() {
+            Some(x) => x,
+            None => return children,
+        };
 
         // OP_DUP
         //
@@ -328,17 +272,55 @@ impl State {
         let (bottom, [top0_prime, top0]) = util::split_last_chunk2(&self.target);
 
         if let Some(top0) = unify(top0, top0_prime) {
-            children.push(
-                self.make_child(
+            if target[idx0] == top0 {
+                children.push(self.make_child(
                     StackOp::Dup,
                     bottom.iter().copied().chain([Some(top0)]).collect(),
-                    [Above::Push(top0)]
-                        .into_iter()
-                        .chain(self.above.iter().copied())
-                        .collect(),
-                ),
-            );
+                    Vec::from(above_bottom),
+                ));
+            }
         }
+
+        // OP_OVER
+        //
+        // [α 1 0] → [α 1 0 1]
+        // [  1 0] → [  _ 0 1]
+        // [  1 _] → [  _ _ 1]
+        let (bottom, [top1_prime, top0, top1]) = util::split_last_chunk2(&self.target);
+
+        if let Some(top1) = unify(top1, top1_prime) {
+            if target[idx0] == top1 {
+                children.push(self.make_child(
+                    StackOp::Over,
+                    bottom.iter().copied().chain([Some(top1), top0]).collect(),
+                    Vec::from(above_bottom),
+                ));
+            }
+        }
+
+        let (above_bottom, &[idx1, idx0]) = match self.above.split_last_chunk() {
+            Some(x) => x,
+            None => return children,
+        };
+
+        // // OP_TUCK
+        // //
+        // // [α 1 0] → [α 0 1 0]
+        // // [  1 0] → [  _ 1 0]
+        // // [  _ 0] → [  _ _ 0]
+        // let (bottom, [top0_prime, top1, top0]) = util::split_last_chunk2(&self.target);
+        //
+        // if let Some(top0) = unify(top0, top0_prime) {
+        //     if target[idx0] == top0 {
+        //         children.push(
+        //             self.make_child(
+        //                 StackOp::Tuck,
+        //                 bottom.iter().copied().chain([top1, Some(top0)]).collect(),
+        //                 above_tuck(&self.above)
+        //             ),
+        //         );
+        //     }
+        // }
 
         // OP_2DUP
         //
@@ -348,21 +330,51 @@ impl State {
         let (bottom, [top1_prime, top0_prime, top1, top0]) = util::split_last_chunk2(&self.target);
 
         if let (Some(top1), Some(top0)) = (unify(top1, top1_prime), unify(top0, top0_prime)) {
-            children.push(
-                self.make_child(
-                    StackOp::_2Dup,
-                    bottom
-                        .iter()
-                        .copied()
-                        .chain([Some(top1), Some(top0)])
-                        .collect(),
-                    [Above::Push(top1), Above::Push(top0)]
-                        .into_iter()
-                        .chain(self.above.iter().copied())
-                        .collect(),
-                ),
-            );
+            if target[idx1] == top1 && target[idx0] == top0 {
+                children.push(
+                    self.make_child(
+                        StackOp::_2Dup,
+                        bottom
+                            .iter()
+                            .copied()
+                            .chain([Some(top1), Some(top0)])
+                            .collect(),
+                        Vec::from(above_bottom),
+                    ),
+                );
+            }
         }
+
+        // OP_2OVER
+        //
+        // [α 3 2 1 0] → [α 3 2 1 0 3 2]
+        // [  3 2 1 0] → [  _ 2 1 0 3 2]
+        // [  3 2 1 0] → [  _ _ 1 0 3 2]
+        // [  3 2 _ 0] → [  _ _ _ 0 3 2]
+        // [  3 2 _ _] → [  _ _ _ _ 3 2]
+        let (bottom, [top3_prime, top2_prime, top1, top0, top3, top2]) =
+            util::split_last_chunk2(&self.target);
+
+        if let (Some(top3), Some(top2)) = (unify(top3, top3_prime), unify(top2, top2_prime)) {
+            if target[idx1] == top3 && target[idx0] == top2 {
+                children.push(
+                    self.make_child(
+                        StackOp::_2Over,
+                        bottom
+                            .iter()
+                            .copied()
+                            .chain([Some(top3), Some(top2), top1, top0])
+                            .collect(),
+                        Vec::from(above_bottom),
+                    ),
+                );
+            }
+        }
+
+        let (above_bottom, &[idx2, idx1, idx0]) = match self.above.split_last_chunk() {
+            Some(x) => x,
+            None => return children,
+        };
 
         // OP_3DUP
         //
@@ -378,186 +390,120 @@ impl State {
             unify(top1, top1_prime),
             unify(top0, top0_prime),
         ) {
-            children.push(
-                self.make_child(
-                    StackOp::_3Dup,
-                    bottom
-                        .iter()
-                        .copied()
-                        .chain([Some(top2), Some(top1), Some(top0)])
-                        .collect(),
-                    [Above::Push(top2), Above::Push(top1), Above::Push(top0)]
-                        .into_iter()
-                        .chain(self.above.iter().copied())
-                        .collect(),
-                ),
-            );
+            if target[idx2] == top2 && target[idx1] == top1 && target[idx0] == top0 {
+                children.push(
+                    self.make_child(
+                        StackOp::_3Dup,
+                        bottom
+                            .iter()
+                            .copied()
+                            .chain([Some(top2), Some(top1), Some(top0)])
+                            .collect(),
+                        Vec::from(above_bottom),
+                    ),
+                );
+            }
         }
 
-        // OP_OVER
+        // // OP_SWAP
+        // //
+        // // [α 1 0] → [α 0 1]
+        // // [  1 _] → [  _ 1]
+        // if !self.target.is_empty() {
+        //     let (bottom, [top0, top1]) = util::split_last_chunk2(&self.target);
+        //     children.push(
+        //         self.make_child(
+        //             StackOp::Swap,
+        //             bottom.iter().copied().chain([top1, top0]).collect(),
+        //             [Above::Swap]
+        //                 .into_iter()
+        //                 .chain(self.above.iter().copied())
+        //                 .collect(),
+        //         ),
+        //     );
+        // }
         //
-        // [α 1 0] → [α 1 0 1]
-        // [  1 0] → [  _ 0 1]
-        // [  1 _] → [  _ _ 1]
-        let (bottom, [top1_prime, top0, top1]) = util::split_last_chunk2(&self.target);
-
-        if let Some(top1) = unify(top1, top1_prime) {
-            children.push(
-                self.make_child(
-                    StackOp::Over,
-                    bottom.iter().copied().chain([Some(top1), top0]).collect(),
-                    [Above::Push(top1)]
-                        .into_iter()
-                        .chain(self.above.iter().copied())
-                        .collect(),
-                ),
-            );
-        }
-
-        // OP_2OVER
+        // // OP_2SWAP
+        // //
+        // // [α 3 2 1 0] → [α 1 0 3 2]
+        // // [  3 2 _ 0] → [  _ 0 3 2]
+        // // [  3 2 _ _] → [  _ _ 3 2]
+        // // [  _ 2 _ _] → [  _ _ _ 2]
+        // if !self.target.is_empty() {
+        //     let (bottom, [top1, top0, top3, top2]) = util::split_last_chunk2(&self.target);
+        //     children.push(
+        //         self.make_child(
+        //             StackOp::_2Swap,
+        //             bottom
+        //                 .iter()
+        //                 .copied()
+        //                 .chain([top3, top2, top1, top0])
+        //                 .collect(),
+        //             self.above.clone(),
+        //         ),
+        //     );
+        // }
         //
-        // [α 3 2 1 0] → [α 3 2 1 0 3 2]
-        // [  3 2 1 0] → [  _ 2 1 0 3 2]
-        // [  3 2 1 0] → [  _ _ 1 0 3 2]
-        // [  3 2 _ 0] → [  _ _ _ 0 3 2]
-        // [  3 2 _ _] → [  _ _ _ _ 3 2]
-        let (bottom, [top3_prime, top2_prime, top1, top0, top3, top2]) =
-            util::split_last_chunk2(&self.target);
-
-        if let (Some(top3), Some(top2)) = (unify(top3, top3_prime), unify(top2, top2_prime)) {
-            children.push(
-                self.make_child(
-                    StackOp::_2Over,
-                    bottom
-                        .iter()
-                        .copied()
-                        .chain([Some(top3), Some(top2), top1, top0])
-                        .collect(),
-                    [Above::Push(top3), Above::Push(top2)]
-                        .into_iter()
-                        .chain(self.above.iter().copied())
-                        .collect(),
-                ),
-            );
-        }
-
-        // OP_TUCK
+        // // OP_ROT
+        // //
+        // // [α 2 1 0] → [α 1 0 2]
+        // // [  2 _ 0] → [  _ 0 2]
+        // // [  2 _ _] → [  _ _ 2]
+        // if !self.target.is_empty() {
+        //     let (bottom, [top1, top0, top2]) = util::split_last_chunk2(&self.target);
+        //     children.push(self.make_child(
+        //         StackOp::Rot,
+        //         bottom.iter().copied().chain([top2, top1, top0]).collect(),
+        //         self.above.clone(),
+        //     ));
+        // }
         //
-        // [α 1 0] → [α 0 1 0]
-        // [  1 0] → [  _ 1 0]
-        // [  _ 0] → [  _ _ 0]
-        let (bottom, [top0_prime, top1, top0]) = util::split_last_chunk2(&self.target);
-
-        if let Some(top0) = unify(top0, top0_prime) {
-            children.push(
-                self.make_child(
-                    StackOp::Tuck,
-                    bottom.iter().copied().chain([top1, Some(top0)]).collect(),
-                    [Above::Tuck(top0)]
-                        .into_iter()
-                        .chain(self.above.iter().copied())
-                        .collect(),
-                ),
-            );
-        }
-
-        // OP_SWAP
-        //
-        // [α 1 0] → [α 0 1]
-        // [  1 _] → [  _ 1]
-        if !self.target.is_empty() {
-            let (bottom, [top0, top1]) = util::split_last_chunk2(&self.target);
-            children.push(
-                self.make_child(
-                    StackOp::Swap,
-                    bottom.iter().copied().chain([top1, top0]).collect(),
-                    [Above::Swap]
-                        .into_iter()
-                        .chain(self.above.iter().copied())
-                        .collect(),
-                ),
-            );
-        }
-
-        // OP_2SWAP
-        //
-        // [α 3 2 1 0] → [α 1 0 3 2]
-        // [  3 2 _ 0] → [  _ 0 3 2]
-        // [  3 2 _ _] → [  _ _ 3 2]
-        // [  _ 2 _ _] → [  _ _ _ 2]
-        if !self.target.is_empty() {
-            let (bottom, [top1, top0, top3, top2]) = util::split_last_chunk2(&self.target);
-            children.push(
-                self.make_child(
-                    StackOp::_2Swap,
-                    bottom
-                        .iter()
-                        .copied()
-                        .chain([top3, top2, top1, top0])
-                        .collect(),
-                    self.above.clone(),
-                ),
-            );
-        }
-
-        // OP_ROT
-        //
-        // [α 2 1 0] → [α 1 0 2]
-        // [  2 _ 0] → [  _ 0 2]
-        // [  2 _ _] → [  _ _ 2]
-        if !self.target.is_empty() {
-            let (bottom, [top1, top0, top2]) = util::split_last_chunk2(&self.target);
-            children.push(self.make_child(
-                StackOp::Rot,
-                bottom.iter().copied().chain([top2, top1, top0]).collect(),
-                self.above.clone(),
-            ));
-        }
-
-        // OP_2ROT
-        //
-        // [α 5 4 3 2 1 0] → [α 3 2 1 0 5 4]
-        // [  5 4 _ 2 1 0] → [  _ 2 1 0 5 4]
-        // [  5 4 _ _ 1 0] → [  _ _ 1 0 5 4]
-        // [  5 4 _ _ _ 0] → [  _ _ _ 0 5 4]
-        // [  5 4 _ _ _ _] → [  _ _ _ _ 5 4]
-        // [  _ 4 _ _ _ _] → [  _ _ _ _ _ 4]
-        if !self.target.is_empty() {
-            let (bottom, [top3, top2, top1, top0, top5, top4]) =
-                util::split_last_chunk2(&self.target);
-            children.push(
-                self.make_child(
-                    StackOp::_2Rot,
-                    bottom
-                        .iter()
-                        .copied()
-                        .chain([top5, top4, top3, top2, top1, top0])
-                        .collect(),
-                    self.above.clone(),
-                ),
-            );
-        }
+        // // OP_2ROT
+        // //
+        // // [α 5 4 3 2 1 0] → [α 3 2 1 0 5 4]
+        // // [  5 4 _ 2 1 0] → [  _ 2 1 0 5 4]
+        // // [  5 4 _ _ 1 0] → [  _ _ 1 0 5 4]
+        // // [  5 4 _ _ _ 0] → [  _ _ _ 0 5 4]
+        // // [  5 4 _ _ _ _] → [  _ _ _ _ 5 4]
+        // // [  _ 4 _ _ _ _] → [  _ _ _ _ _ 4]
+        // if !self.target.is_empty() {
+        //     let (bottom, [top3, top2, top1, top0, top5, top4]) =
+        //         util::split_last_chunk2(&self.target);
+        //     children.push(
+        //         self.make_child(
+        //             StackOp::_2Rot,
+        //             bottom
+        //                 .iter()
+        //                 .copied()
+        //                 .chain([top5, top4, top3, top2, top1, top0])
+        //                 .collect(),
+        //             self.above.clone(),
+        //         ),
+        //     );
+        // }
 
         children
     }
 
-    pub fn reverse_apply2(&self) -> Vec<Self> {
+    pub fn reverse_apply2(&self, target: &[Id]) -> Vec<Self> {
         let mut children = Vec::new();
+
+        let (above_bottom, &[idx0]) = match self.above.split_last_chunk() {
+            Some(x) => x,
+            None => return children,
+        };
 
         // OP_PICK X
         //
         // [α X β] → [α X β X]
         if let Some((bottom, &[Some(top0)])) = self.target.split_last_chunk() {
-            children.push(
-                self.make_child(
+            if target[idx0] == top0 {
+                children.push(self.make_child(
                     StackOp::Pick(top0),
                     Vec::from(bottom),
-                    [Above::Push(top0)]
-                        .into_iter()
-                        .chain(self.above.iter().copied())
-                        .collect(),
-                ),
-            );
+                    Vec::from(above_bottom),
+                ));
+            }
         }
 
         // OP_ROLL X
@@ -589,6 +535,19 @@ impl State {
         // }
 
         children
+    }
+}
+
+fn above_tuck(above: &[usize]) -> Vec<usize> {
+    match above {
+        &[] => panic!("Above must have one element"),
+        &[_idx0] => Vec::new(),
+        &[_idx1, idx0] => vec![idx0],
+        _ => {
+            let (before_above, &[idx0_prime, idx1, idx0]) = above.split_last_chunk().unwrap();
+            debug_assert_eq!(idx0_prime, idx0);
+            before_above.iter().copied().chain([idx1, idx0]).collect()
+        }
     }
 }
 
@@ -781,11 +740,11 @@ mod tests {
             StackOp::_3Dup,
             StackOp::Over,
             StackOp::_2Over,
-            StackOp::Tuck,
-            StackOp::Swap,
-            StackOp::_2Swap,
-            StackOp::Rot,
-            StackOp::_2Rot,
+            // StackOp::Tuck,
+            // StackOp::Swap,
+            // StackOp::_2Swap,
+            // StackOp::Rot,
+            // StackOp::_2Rot,
         ]
         .into_iter()
         .chain(target_items.clone().map(StackOp::Pick))
