@@ -168,6 +168,8 @@ fn find_shortest_transformation_(source: &[Option<Id>], target: &[Id]) -> Vec<St
 
         for state in queue_n_plus_0 {
             debug_assert_eq!(script_bytes, script_cost(&state.script));
+            debug_assert!(state.sanity_check(target));
+
             // println!("{:?}", state.script);
             //
             // if let &[StackOp::Over, StackOp::Swap] = state.script.as_slice() {
@@ -207,9 +209,7 @@ struct State {
     ///
     /// `None` elements are free variables that match anything.
     target: Vec<Option<Id>>,
-    /// Produced stack elements above target.
-    ///
-    /// The stack elements are encoded in a pseudo script.
+    /// Maps indices from `self.target` to indices from the global `target`.
     above: Vec<usize>,
 }
 
@@ -220,6 +220,27 @@ impl State {
             target: target.iter().copied().map(Some).collect(),
             above: (0..target.len()).collect(),
         }
+    }
+
+    fn sanity_check(&self, target: &[Id]) -> bool {
+        // [ ~~~~~ self.target ~~~~~ ]
+        //              [ self.above ]
+        //              ↓↓↓↓↓↓↓↓↓↓↓↓↓↓
+        //              [ ~~~~~ target ~~~~~ ]
+        let local_idx_delta = match self.target.len().checked_sub(self.above.len()) {
+            Some(x) => x,
+            None => return false,
+        };
+
+        self.above
+            .iter()
+            .copied()
+            .enumerate()
+            .all(|(local_idx, global_idx)| {
+                self.target[local_idx_delta + local_idx]
+                    .map(|x| target[global_idx] == x)
+                    .unwrap_or(true)
+            })
     }
 
     /// Checks if the state matches the given `source` stack and the given `target` stack top.
@@ -260,6 +281,86 @@ impl State {
     pub fn reverse_apply1(&self, target: &[Id]) -> Vec<Self> {
         let mut children = Vec::new();
 
+        // OP_SWAP
+        //
+        // [α 1 0] → [α 0 1]
+        // [  1 _] → [  _ 1]
+        if !self.target.is_empty() {
+            if let Some(new_above) = above_swap(&self.above) {
+                let (bottom, [top0, top1]) = util::split_last_chunk2(&self.target);
+                children.push(self.make_child(
+                    StackOp::Swap,
+                    bottom.iter().copied().chain([top1, top0]).collect(),
+                    new_above,
+                ));
+            }
+        }
+
+        // OP_2SWAP
+        //
+        // [α 3 2 1 0] → [α 1 0 3 2]
+        // [  3 2 _ 0] → [  _ 0 3 2]
+        // [  3 2 _ _] → [  _ _ 3 2]
+        // [  _ 2 _ _] → [  _ _ _ 2]
+        if !self.target.is_empty() {
+            if let Some(new_above) = above_2swap(&self.above) {
+                let (bottom, [top1, top0, top3, top2]) = util::split_last_chunk2(&self.target);
+                children.push(
+                    self.make_child(
+                        StackOp::_2Swap,
+                        bottom
+                            .iter()
+                            .copied()
+                            .chain([top3, top2, top1, top0])
+                            .collect(),
+                        new_above,
+                    ),
+                );
+            }
+        }
+
+        // OP_ROT
+        //
+        // [α 2 1 0] → [α 1 0 2]
+        // [  2 _ 0] → [  _ 0 2]
+        // [  2 _ _] → [  _ _ 2]
+        if !self.target.is_empty() {
+            if let Some(new_above) = above_rot(&self.above) {
+                let (bottom, [top1, top0, top2]) = util::split_last_chunk2(&self.target);
+                children.push(self.make_child(
+                    StackOp::Rot,
+                    bottom.iter().copied().chain([top2, top1, top0]).collect(),
+                    new_above,
+                ));
+            }
+        }
+
+        // OP_2ROT
+        //
+        // [α 5 4 3 2 1 0] → [α 3 2 1 0 5 4]
+        // [  5 4 _ 2 1 0] → [  _ 2 1 0 5 4]
+        // [  5 4 _ _ 1 0] → [  _ _ 1 0 5 4]
+        // [  5 4 _ _ _ 0] → [  _ _ _ 0 5 4]
+        // [  5 4 _ _ _ _] → [  _ _ _ _ 5 4]
+        // [  _ 4 _ _ _ _] → [  _ _ _ _ _ 4]
+        if !self.target.is_empty() {
+            if let Some(new_above) = above_2rot(&self.above) {
+                let (bottom, [top3, top2, top1, top0, top5, top4]) =
+                    util::split_last_chunk2(&self.target);
+                children.push(
+                    self.make_child(
+                        StackOp::_2Rot,
+                        bottom
+                            .iter()
+                            .copied()
+                            .chain([top5, top4, top3, top2, top1, top0])
+                            .collect(),
+                        new_above,
+                    ),
+                );
+            }
+        }
+
         let (above_bottom, &[idx0]) = match self.above.split_last_chunk() {
             Some(x) => x,
             None => return children,
@@ -298,29 +399,29 @@ impl State {
             }
         }
 
+        // OP_TUCK
+        //
+        // [α 1 0] → [α 0 1 0]
+        // [  1 0] → [  _ 1 0]
+        // [  _ 0] → [  _ _ 0]
+        let (bottom, [top0_prime, top1, top0]) = util::split_last_chunk2(&self.target);
+
+        if let Some(top0) = unify(top0, top0_prime) {
+            if target[idx0] == top0 {
+                if let Some(new_above) = above_tuck(&self.above) {
+                    children.push(self.make_child(
+                        StackOp::Tuck,
+                        bottom.iter().copied().chain([top1, Some(top0)]).collect(),
+                        new_above,
+                    ));
+                }
+            }
+        }
+
         let (above_bottom, &[idx1, idx0]) = match self.above.split_last_chunk() {
             Some(x) => x,
             None => return children,
         };
-
-        // // OP_TUCK
-        // //
-        // // [α 1 0] → [α 0 1 0]
-        // // [  1 0] → [  _ 1 0]
-        // // [  _ 0] → [  _ _ 0]
-        // let (bottom, [top0_prime, top1, top0]) = util::split_last_chunk2(&self.target);
-        //
-        // if let Some(top0) = unify(top0, top0_prime) {
-        //     if target[idx0] == top0 {
-        //         children.push(
-        //             self.make_child(
-        //                 StackOp::Tuck,
-        //                 bottom.iter().copied().chain([top1, Some(top0)]).collect(),
-        //                 above_tuck(&self.above)
-        //             ),
-        //         );
-        //     }
-        // }
 
         // OP_2DUP
         //
@@ -405,83 +506,6 @@ impl State {
             }
         }
 
-        // // OP_SWAP
-        // //
-        // // [α 1 0] → [α 0 1]
-        // // [  1 _] → [  _ 1]
-        // if !self.target.is_empty() {
-        //     let (bottom, [top0, top1]) = util::split_last_chunk2(&self.target);
-        //     children.push(
-        //         self.make_child(
-        //             StackOp::Swap,
-        //             bottom.iter().copied().chain([top1, top0]).collect(),
-        //             [Above::Swap]
-        //                 .into_iter()
-        //                 .chain(self.above.iter().copied())
-        //                 .collect(),
-        //         ),
-        //     );
-        // }
-        //
-        // // OP_2SWAP
-        // //
-        // // [α 3 2 1 0] → [α 1 0 3 2]
-        // // [  3 2 _ 0] → [  _ 0 3 2]
-        // // [  3 2 _ _] → [  _ _ 3 2]
-        // // [  _ 2 _ _] → [  _ _ _ 2]
-        // if !self.target.is_empty() {
-        //     let (bottom, [top1, top0, top3, top2]) = util::split_last_chunk2(&self.target);
-        //     children.push(
-        //         self.make_child(
-        //             StackOp::_2Swap,
-        //             bottom
-        //                 .iter()
-        //                 .copied()
-        //                 .chain([top3, top2, top1, top0])
-        //                 .collect(),
-        //             self.above.clone(),
-        //         ),
-        //     );
-        // }
-        //
-        // // OP_ROT
-        // //
-        // // [α 2 1 0] → [α 1 0 2]
-        // // [  2 _ 0] → [  _ 0 2]
-        // // [  2 _ _] → [  _ _ 2]
-        // if !self.target.is_empty() {
-        //     let (bottom, [top1, top0, top2]) = util::split_last_chunk2(&self.target);
-        //     children.push(self.make_child(
-        //         StackOp::Rot,
-        //         bottom.iter().copied().chain([top2, top1, top0]).collect(),
-        //         self.above.clone(),
-        //     ));
-        // }
-        //
-        // // OP_2ROT
-        // //
-        // // [α 5 4 3 2 1 0] → [α 3 2 1 0 5 4]
-        // // [  5 4 _ 2 1 0] → [  _ 2 1 0 5 4]
-        // // [  5 4 _ _ 1 0] → [  _ _ 1 0 5 4]
-        // // [  5 4 _ _ _ 0] → [  _ _ _ 0 5 4]
-        // // [  5 4 _ _ _ _] → [  _ _ _ _ 5 4]
-        // // [  _ 4 _ _ _ _] → [  _ _ _ _ _ 4]
-        // if !self.target.is_empty() {
-        //     let (bottom, [top3, top2, top1, top0, top5, top4]) =
-        //         util::split_last_chunk2(&self.target);
-        //     children.push(
-        //         self.make_child(
-        //             StackOp::_2Rot,
-        //             bottom
-        //                 .iter()
-        //                 .copied()
-        //                 .chain([top5, top4, top3, top2, top1, top0])
-        //                 .collect(),
-        //             self.above.clone(),
-        //         ),
-        //     );
-        // }
-
         children
     }
 
@@ -538,15 +562,85 @@ impl State {
     }
 }
 
-fn above_tuck(above: &[usize]) -> Vec<usize> {
-    match above {
-        &[] => panic!("Above must have one element"),
-        &[_idx0] => Vec::new(),
-        &[_idx1, idx0] => vec![idx0],
+// TODO: Support local target moving into source stack
+// TODO: Track indices inside source stack
+fn above_tuck(above: &[usize]) -> Option<Vec<usize>> {
+    match above.len() {
+        0 => panic!("Above must have one element"),
+        1 => Some(Vec::new()),
+        2 => None, // TODO: Support moved items
         _ => {
-            let (before_above, &[idx0_prime, idx1, idx0]) = above.split_last_chunk().unwrap();
-            debug_assert_eq!(idx0_prime, idx0);
-            before_above.iter().copied().chain([idx1, idx0]).collect()
+            let (before_above, &[idx0_prime, idx1, _idx0]) = above.split_last_chunk().unwrap();
+            Some(
+                before_above
+                    .iter()
+                    .copied()
+                    .chain([idx1, idx0_prime])
+                    .collect(),
+            )
+        }
+    }
+}
+
+fn above_swap(above: &[usize]) -> Option<Vec<usize>> {
+    match above.len() {
+        0 => Some(Vec::new()),
+        1 => None, // TODO: Support moved items
+        _ => {
+            let (before_above, &[idx0, idx1]) = above.split_last_chunk().unwrap();
+            Some(before_above.iter().copied().chain([idx1, idx0]).collect())
+        }
+    }
+}
+
+fn above_2swap(above: &[usize]) -> Option<Vec<usize>> {
+    match above.len() {
+        0 => Some(Vec::new()),
+        1..=3 => None, // TODO: Support moved items
+        _ => {
+            let (before_above, &[idx1, idx0, idx3, idx2]) = above.split_last_chunk().unwrap();
+            Some(
+                before_above
+                    .iter()
+                    .copied()
+                    .chain([idx3, idx2, idx1, idx0])
+                    .collect(),
+            )
+        }
+    }
+}
+
+fn above_rot(above: &[usize]) -> Option<Vec<usize>> {
+    match above.len() {
+        0 => Some(Vec::new()),
+        1..=2 => None, // TODO: Support moved items
+        _ => {
+            let (before_above, &[idx1, idx0, idx2]) = above.split_last_chunk().unwrap();
+            Some(
+                before_above
+                    .iter()
+                    .copied()
+                    .chain([idx2, idx1, idx0])
+                    .collect(),
+            )
+        }
+    }
+}
+
+fn above_2rot(above: &[usize]) -> Option<Vec<usize>> {
+    match above.len() {
+        0 => Some(Vec::new()),
+        1..=5 => None, // TODO: Support moved items
+        _ => {
+            let (before_above, &[idx3, idx2, idx1, idx0, idx5, idx4]) =
+                above.split_last_chunk().unwrap();
+            Some(
+                before_above
+                    .iter()
+                    .copied()
+                    .chain([idx5, idx4, idx3, idx2, idx1, idx0])
+                    .collect(),
+            )
         }
     }
 }
@@ -688,14 +782,15 @@ mod tests {
         Ok(())
     }
 
-    // #[test]
-    // #[ignore]
-    // fn find_transformation_regression1() {
-    //     let source = &[235, 154, 0, 46, 255];
-    //     let target = &[255, 235, 154, 0, 0, 0, 0, 0, 0, 0];
-    //     let _doesnt_run_out_of_memory =
-    //         find_shortest_transformation(source, target).expect("there should be a transformation");
-    // }
+    // Seems to take 10 GB of memory currently
+    #[test]
+    #[ignore]
+    fn find_transformation_regression1() {
+        let source = &[235, 154, 0, 46, 255];
+        let target = &[255, 235, 154, 0, 0, 0, 0, 0, 0, 0];
+        let _doesnt_run_out_of_memory =
+            find_shortest_transformation(source, target).expect("there should be a transformation");
+    }
 
     #[test]
     fn find_transformation_regression2() {
@@ -727,7 +822,7 @@ mod tests {
         let target = &[1, 1, 0];
         let script = find_shortest_transformation(source, target).unwrap();
         assert_eq!(
-            &[StackOp::Over, StackOp::_2Dup, StackOp::Swap],
+            &[StackOp::_2Dup, StackOp::Over, StackOp::Swap],
             script.as_slice()
         );
     }
@@ -740,11 +835,11 @@ mod tests {
             StackOp::_3Dup,
             StackOp::Over,
             StackOp::_2Over,
-            // StackOp::Tuck,
-            // StackOp::Swap,
-            // StackOp::_2Swap,
-            // StackOp::Rot,
-            // StackOp::_2Rot,
+            StackOp::Tuck,
+            StackOp::Swap,
+            StackOp::_2Swap,
+            StackOp::Rot,
+            StackOp::_2Rot,
         ]
         .into_iter()
         .chain(target_items.clone().map(StackOp::Pick))
