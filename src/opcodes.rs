@@ -1,8 +1,8 @@
+use crate::util;
+use itertools::Itertools;
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZero;
-
-use crate::util;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StackOp<T> {
@@ -112,7 +112,14 @@ fn apply_map<S: Eq + std::hash::Hash, T: Clone>(
     slice.iter().map(|id| map.get(id).cloned()).collect()
 }
 
-// TODO: Copy some elements, move other elements
+pub fn find_shortest_transformation<T: Clone + Ord + fmt::Debug + std::hash::Hash>(
+    source: &[T],
+    target: &[T],
+) -> Option<Vec<StackOp<T>>> {
+    find_shortest_transformation2(source, target, target)
+}
+
+// TODO: Support OP_ROLL
 /// Computes a minimal Bitcoin script that puts the `target` on top of the `source` stack.
 ///
 /// After applying the script, the result stack consists of the `source` stack
@@ -129,21 +136,29 @@ fn apply_map<S: Eq + std::hash::Hash, T: Clone>(
 ///
 /// In the worst case, the algorithm will check 7^(2n) scripts for a target of size n.
 /// In other words, the algorithm takes exponential time in the target size.
-pub fn find_shortest_transformation<T: Clone + Ord + fmt::Debug + std::hash::Hash>(
+pub fn find_shortest_transformation2<T: Clone + Ord + fmt::Debug + std::hash::Hash>(
     source: &[T],
     target: &[T],
+    to_copy: &[T],
 ) -> Option<Vec<StackOp<T>>> {
     // Bail out if the source is missing elements from the target
-    if target.iter().any(|name| !source.contains(name)) {
+    if target.iter().any(|x| !source.contains(x)) {
         return None;
     }
-    if 255 <= target.len() {
+    // Bail out if to_copy is not subset of the target
+    if to_copy.iter().any(|x| !target.contains(x)) {
+        return None;
+    }
+    // Bail out if target is too long
+    if usize::from(u8::MAX) <= target.len() {
         return None;
     }
 
     let (mapped_target, map, map_back) = get_maps(target);
     let mapped_source = apply_map(source, &map);
-    let mapped_script = find_shortest_transformation_(&mapped_source, &mapped_target);
+    let mapped_to_copy: Vec<Id> = to_copy.iter().map(|x| *map.get(x).unwrap()).collect();
+    let mapped_script =
+        find_shortest_transformation_(&mapped_source, &mapped_target, &mapped_to_copy);
 
     let script = mapped_script
         .into_iter()
@@ -152,8 +167,12 @@ pub fn find_shortest_transformation<T: Clone + Ord + fmt::Debug + std::hash::Has
     Some(script)
 }
 
-fn find_shortest_transformation_(source: &[Option<Id>], target: &[Id]) -> Vec<StackOp<Id>> {
-    let initial_state = State::new(target);
+fn find_shortest_transformation_(
+    source: &[Option<Id>],
+    target: &[Id],
+    to_copy: &[Id],
+) -> Vec<StackOp<Id>> {
+    let initial_state = State::initial(target, to_copy);
     let mut queue_n_plus_0 = vec![initial_state];
     let mut queue_n_plus_1 = Vec::new();
     let mut script_bytes = 0;
@@ -210,15 +229,28 @@ struct State {
     /// `None` elements are free variables that match anything.
     target: Vec<Option<Id>>,
     /// Maps indices from `self.target` to indices from the global `target`.
-    above: Vec<usize>,
+    ///
+    /// The map is used to check if items that are produced by opcodes
+    /// (such as `OP_DUP`) are on the list of copied items.
+    /// Moved items are not relevant and stored as `None` in the map.
+    ///
+    /// Remember that copied items are disjoint from the moved items.
+    above: Vec<Option<usize>>,
 }
 
 impl State {
-    pub fn new(target: &[Id]) -> Self {
+    pub fn initial(target: &[Id], to_copy: &[Id]) -> Self {
         Self {
             script: vec![],
             target: target.iter().copied().map(Some).collect(),
-            above: (0..target.len()).collect(),
+            above: target
+                .iter()
+                .enumerate()
+                .map(|(index, item)| match to_copy.iter().contains(item) {
+                    true => Some(index), // to-be-copied item
+                    false => None,       // to-be-moved item
+                })
+                .collect(),
         }
     }
 
@@ -232,36 +264,46 @@ impl State {
             None => return false,
         };
 
-        self.above
-            .iter()
-            .copied()
-            .enumerate()
-            .all(|(local_idx, global_idx)| {
-                self.target[local_idx_delta + local_idx]
-                    .map(|x| target[global_idx] == x)
-                    .unwrap_or(true)
-            })
+        for (local_idx, global_idx) in self.above.iter().copied().enumerate() {
+            if let (Some(global_idx), Some(x)) =
+                (global_idx, self.target[local_idx_delta + local_idx])
+            {
+                if x != target[global_idx] {
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 
     /// Checks if the state matches the given `source` stack and the given `target` stack top.
     pub fn matches(&self, source: &[Option<Id>]) -> bool {
-        if !self.above.is_empty() {
+        if self.above.iter().any(Option::is_some) {
             return false;
         }
 
-        self.target.len() <= source.len()
-            && self
-                .target
-                .iter()
-                .copied()
-                .enumerate()
-                .all(|(index, x)| match x {
-                    Some(x) => source[source.len() - self.target.len() + index] == Some(x),
-                    None => true,
-                })
+        if source.len() < self.target.len() {
+            return false;
+        }
+
+        for (index, x) in self.target.iter().copied().enumerate() {
+            if let Some(x) = x {
+                if Some(x) != source[source.len() - self.target.len() + index] {
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 
-    fn make_child(&self, op: StackOp<Id>, target: Vec<Option<Id>>, above: Vec<usize>) -> Self {
+    fn make_child(
+        &self,
+        op: StackOp<Id>,
+        target: Vec<Option<Id>>,
+        above: Vec<Option<usize>>,
+    ) -> Self {
         State {
             script: std::iter::once(op)
                 .chain(self.script.iter().copied())
@@ -359,9 +401,11 @@ impl State {
             }
         }
 
-        let (above_bottom, &[idx0]) = match self.above.split_last_chunk() {
-            Some(x) => x,
-            None => return,
+        // Require at least one copied item to be produced.
+        // Copied items live in `Some(index)`
+        let (above_bottom, idx0) = match self.above.split_last_chunk() {
+            Some((above_bottom, &[Some(idx0)])) => (above_bottom, idx0),
+            _ => return,
         };
 
         // OP_DUP
@@ -406,7 +450,7 @@ impl State {
 
         if let Some(top0) = unify(top0, top0_prime) {
             if target[idx0] == top0 {
-                if let Some(new_above) = above_tuck(&self.above) {
+                if let Some(new_above) = above_tuck(above_bottom) {
                     children.push(self.make_child(
                         StackOp::Tuck,
                         bottom.iter().copied().chain([top1, Some(top0)]).collect(),
@@ -416,9 +460,10 @@ impl State {
             }
         }
 
-        let (above_bottom, &[idx1, idx0]) = match self.above.split_last_chunk() {
-            Some(x) => x,
-            None => return,
+        // Require at least two copied items to be produced.
+        let (above_bottom, idx1, idx0) = match self.above.split_last_chunk() {
+            Some((above_bottom, &[Some(idx1), Some(idx0)])) => (above_bottom, idx1, idx0),
+            _ => return,
         };
 
         // OP_2DUP
@@ -470,9 +515,12 @@ impl State {
             }
         }
 
-        let (above_bottom, &[idx2, idx1, idx0]) = match self.above.split_last_chunk() {
-            Some(x) => x,
-            None => return,
+        // Require at least three copied items to be produced.
+        let (above_bottom, idx2, idx1, idx0) = match self.above.split_last_chunk() {
+            Some((above_bottom, &[Some(idx2), Some(idx1), Some(idx0)])) => {
+                (above_bottom, idx2, idx1, idx0)
+            }
+            _ => return,
         };
 
         // OP_3DUP
@@ -506,9 +554,10 @@ impl State {
     }
 
     pub fn reverse_apply2(&self, children: &mut Vec<Self>, target: &[Id]) {
-        let (above_bottom, &[idx0]) = match self.above.split_last_chunk() {
-            Some(x) => x,
-            None => return,
+        // Require at least one copied item to be produced.
+        let (above_bottom, idx0) = match self.above.split_last_chunk() {
+            Some((above_bottom, &[Some(idx0)])) => (above_bottom, idx0),
+            _ => return,
         };
 
         // OP_PICK X
@@ -554,30 +603,20 @@ impl State {
     }
 }
 
-// TODO: Support local target moving into source stack
-// TODO: Track indices inside source stack
-fn above_tuck(above: &[usize]) -> Option<Vec<usize>> {
-    match above.len() {
-        0 => panic!("Above must have one element"),
-        1 => Some(Vec::new()),
-        2 => None, // TODO: Support moved items
-        _ => {
-            let (before_above, &[idx0_prime, idx1, _idx0]) = above.split_last_chunk().unwrap();
-            Some(
-                before_above
-                    .iter()
-                    .copied()
-                    .chain([idx1, idx0_prime])
-                    .collect(),
-            )
-        }
-    }
+fn above_tuck(above_bottom: &[Option<usize>]) -> Option<Vec<Option<usize>>> {
+    above_swap(above_bottom)
 }
 
-fn above_swap(above: &[usize]) -> Option<Vec<usize>> {
-    match above.len() {
-        0 => Some(Vec::new()),
-        1 => None, // TODO: Support moved items
+fn above_swap(above: &[Option<usize>]) -> Option<Vec<Option<usize>>> {
+    match &above {
+        // [1 0 | ] --SWAP-> [0 1 | ]
+        // 1, 0: moved item
+        [] => Some(Vec::new()),
+        // [1 | 0] --SWAP-> [0 | 1]
+        // 1, 0: moved item
+        // 1 cannot be copied item!
+        [None] => Some(Vec::new()),
+        [_] => None,
         _ => {
             let (before_above, &[idx0, idx1]) = above.split_last_chunk().unwrap();
             Some(before_above.iter().copied().chain([idx1, idx0]).collect())
@@ -585,10 +624,23 @@ fn above_swap(above: &[usize]) -> Option<Vec<usize>> {
     }
 }
 
-fn above_2swap(above: &[usize]) -> Option<Vec<usize>> {
-    match above.len() {
-        0 => Some(Vec::new()),
-        1..=3 => None, // TODO: Support moved items
+fn above_2swap(above: &[Option<usize>]) -> Option<Vec<Option<usize>>> {
+    match &above {
+        // [3 2 1 0 | ] --2SWAP-> [1 0 3 2 | ]
+        [] => Some(Vec::new()),
+        // [3 2 1 | 0] --2SWAP-> [1 0 3 | 2]
+        // 3, 2, 1, 0: moved item
+        [None] => Some(Vec::new()),
+        [_] => None,
+        // [3 2 | 1 0] --2SWAP-> [1 0 | 3 2]
+        // 3, 2, 1, 0: moved item
+        [None, None] => Some(Vec::new()),
+        [_, _] => None,
+        // [3 | 2 1 0] --2SWAP-> [1 | 0 3 2]
+        // 3, 1: moved item
+        // 2, 0: unrestrained
+        [x0, None, x2] => Some(vec![*x2, None, *x0]),
+        [_, _, _] => None,
         _ => {
             let (before_above, &[idx1, idx0, idx3, idx2]) = above.split_last_chunk().unwrap();
             Some(
@@ -602,10 +654,19 @@ fn above_2swap(above: &[usize]) -> Option<Vec<usize>> {
     }
 }
 
-fn above_rot(above: &[usize]) -> Option<Vec<usize>> {
-    match above.len() {
-        0 => Some(Vec::new()),
-        1..=2 => None, // TODO: Support moved items
+fn above_rot(above: &[Option<usize>]) -> Option<Vec<Option<usize>>> {
+    match &above {
+        // [2 1 0 | ] --ROT-> [1 0 2 | ]
+        [] => Some(Vec::new()),
+        // [2 1 | 0] --ROT-> [1 0 | 2]
+        // 2, 1, 0: moved item
+        [None] => Some(Vec::new()),
+        [_] => None,
+        // [2 | 1 0] --ROT-> [1 | 0 2]
+        // 2, 1: moved item
+        // 0: unrestrained
+        [idx0, None] => Some(vec![None, *idx0]),
+        [_, _] => None,
         _ => {
             let (before_above, &[idx1, idx0, idx2]) = above.split_last_chunk().unwrap();
             Some(
@@ -619,10 +680,34 @@ fn above_rot(above: &[usize]) -> Option<Vec<usize>> {
     }
 }
 
-fn above_2rot(above: &[usize]) -> Option<Vec<usize>> {
-    match above.len() {
-        0 => Some(Vec::new()),
-        1..=5 => None, // TODO: Support moved items
+fn above_2rot(above: &[Option<usize>]) -> Option<Vec<Option<usize>>> {
+    match &above {
+        // [5 4 3 2 1 0 | ] --2ROT-> [3 2 1 0 5 4 | ]
+        // all: moved items
+        [] => Some(Vec::new()),
+        // [5 4 3 2 1 | 0] --2ROT-> [3 2 1 0 5 | 4]
+        // all: moved items
+        [None] => Some(Vec::new()),
+        [_] => None,
+        // [5 4 3 2 | 1 0] --2ROT-> [3 2 1 0 | 5 4]
+        // all: moved items
+        [None, None] => Some(Vec::new()),
+        [_, _] => None,
+        // [5 4 3 | 2 1 0] --2ROT-> [3 2 1 | 0 5 4]
+        // 5, 4, 3, 2, 1: moved items
+        // 0: unrestrained
+        [idx0, None, None] => Some(vec![None, None, *idx0]),
+        [_, _, _] => None,
+        // [5 4 | 3 2 1 0] --2ROT-> [3 2 | 1 0 5 4]
+        // 5, 4, 3, 2: moved items
+        // 1, 0: unrestrained
+        [idx1, idx0, None, None] => Some(vec![None, None, *idx1, *idx0]),
+        [_, _, _, _] => None,
+        // [5 | 4 3 2 1 0] --2ROT-> [3 | 2 1 0 5 4]
+        // 5, 3: moved items
+        // 4, 2, 1, 0: unrestrained
+        [idx2, idx1, idx0, None, idx4] => Some(vec![*idx4, None, *idx2, *idx1, *idx0]),
+        [_, _, _, _, _] => None,
         _ => {
             let (before_above, &[idx3, idx2, idx1, idx0, idx5, idx4]) =
                 above.split_last_chunk().unwrap();
@@ -819,6 +904,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn find_transformation_regression5() {
+        let source = &[1, 0];
+        let target = &[1, 0];
+        let to_copy = &[0];
+        let script = find_shortest_transformation2(source, target, to_copy).unwrap();
+        assert_eq!(&[StackOp::Tuck], script.as_slice());
+    }
+
     fn all_stack_ops(source_len: u8) -> impl Iterator<Item = StackOp<u8>> + Clone {
         let target_items = 0..source_len;
         [
@@ -838,7 +932,7 @@ mod tests {
         // .chain(target_items.map(StackOp::Roll))
     }
 
-    fn all_copy_scripts(source_len: u8, target_len: u8) -> impl Iterator<Item = Script> {
+    fn all_scripts(source_len: u8, target_len: u8) -> impl Iterator<Item = Script> {
         (1..=target_len * 2).flat_map(move |n| {
             repeat_n(all_stack_ops(source_len), usize::from(n)).multi_cartesian_product()
         })
@@ -847,7 +941,7 @@ mod tests {
     #[test]
     fn iterator_sanity_check() {
         assert_eq!(13, all_stack_ops(3).count());
-        assert_eq!(5_229_042, all_copy_scripts(3, 3).count());
+        assert_eq!(5_229_042, all_scripts(3, 3).count());
     }
 
     fn multiset<T: Eq + std::hash::Hash>(s: &[T]) -> HashMap<&T, usize> {
@@ -906,7 +1000,7 @@ mod tests {
             let mut best_cost = usize::MAX;
             let mut best_script = Vec::new();
 
-            for other_script in all_copy_scripts(source.len() as u8, target.len() as u8)
+            for other_script in all_scripts(source.len() as u8, target.len() as u8)
                 .filter(|s| script_is_functional_copy(source, target, s))
             {
                 let other_cost = script_cost(&other_script);
