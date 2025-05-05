@@ -1039,7 +1039,7 @@ mod tests {
         ]
         .into_iter()
         .chain(target_items.clone().map(StackOp::Pick))
-        // .chain(target_items.map(StackOp::Roll))
+        .chain(target_items.map(StackOp::Roll))
     }
 
     fn all_scripts(source_len: u8, target_len: u8) -> impl Iterator<Item = Script> {
@@ -1050,8 +1050,8 @@ mod tests {
 
     #[test]
     fn iterator_sanity_check() {
-        assert_eq!(13, all_stack_ops(3).count());
-        assert_eq!(5_229_042, all_scripts(3, 3).count());
+        assert_eq!(16, all_stack_ops(3).count());
+        assert_eq!(17_895_696, all_scripts(3, 3).count());
     }
 
     fn multiset<T: Eq + std::hash::Hash>(s: &[T]) -> HashMap<&T, usize> {
@@ -1152,58 +1152,40 @@ mod tests {
     #[test]
     fn transformation_is_optimal_2_1() {
         let source = &[1, 0];
-
-        for target0 in 0..2 {
-            let target = &[target0];
-            transformation_is_optimal(source, target);
+        for target in (0..2).permutations(1) {
+            transformation_is_optimal(source, &target);
         }
     }
 
     #[test]
     fn transformation_is_optimal_2_2() {
         let source = &[1, 0];
-
-        for target0 in 0..2 {
-            for target1 in 0..2 {
-                let target = &[target1, target0];
-                transformation_is_optimal(source, target);
-            }
+        for target in (0..2).permutations(2) {
+            transformation_is_optimal(source, &target);
         }
     }
 
     #[test]
     fn transformation_is_optimal_3_1() {
         let source = &[2, 1, 0];
-
-        for target0 in 0..3 {
-            let target = &[target0];
-            transformation_is_optimal(source, target);
+        for target in (0..3).permutations(1) {
+            transformation_is_optimal(source, &target);
         }
     }
 
     #[test]
     fn transformation_is_optimal_3_2() {
         let source = &[2, 1, 0];
-
-        for target0 in 0..3 {
-            for target1 in 0..3 {
-                let target = &[target1, target0];
-                transformation_is_optimal(source, target);
-            }
+        for target in (0..3).permutations(2) {
+            transformation_is_optimal(source, &target);
         }
     }
 
     #[test]
     fn transformation_is_optimal_3_3() {
         let source = &[2, 1, 0];
-
-        for target0 in 0..3 {
-            for target1 in 0..3 {
-                for target2 in 0..3 {
-                    let target = &[target2, target1, target0];
-                    transformation_is_optimal(source, target);
-                }
-            }
+        for target in (0..3).permutations(3) {
+            transformation_is_optimal(source, &target);
         }
     }
 }
