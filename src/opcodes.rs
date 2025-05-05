@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::NonZero;
+use std::rc::Rc;
 
 use itertools::Itertools;
 
@@ -184,6 +185,8 @@ fn find_shortest_transformation_(
             script_bytes <= target.len() * 2,
             "maximum transformation cost should be 2 times target size (using OP_PICK or OP_ROLL)"
         );
+        // TODO: Allocate queue with known upper bound
+        // Question: Does queue monotonically grow?
         let mut queue_n_plus_2 = Vec::new();
 
         for state in queue_n_plus_0 {
@@ -222,7 +225,7 @@ const fn unify(a: Option<Id>, b: Option<Id>) -> Option<Id> {
     }
 }
 
-// TODO: Enable cheap copying using smart pointers: Rc / Cow / ...
+// TODO: Consider using precomputed tree of states
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct State {
     /// Sequence of stack operations that transforms this state
@@ -233,6 +236,7 @@ struct State {
     /// into the result stack with the target on top.
     ///
     /// As in Bitcoin Script, the first operation appears first in the sequence.
+    // TODO: Consider using arrayvec
     script: Vec<StackOp<Id>>,
     /// Items on top of the stack.
     ///
@@ -242,6 +246,7 @@ struct State {
     /// Items that are `None` are free variables that match anything in the stack.
     ///
     /// The stack top is the last item.
+    // TODO: Consider using arrayvec
     target: Vec<Option<Id>>,
     /// Maps indices from `self.target` to indices from the global `target`.
     ///
@@ -261,13 +266,15 @@ struct State {
     /// ```
     ///
     /// Leading `None` items can be omitted from the vector.
+    // TODO: Consider using arrayvec
     above: Vec<Option<usize>>,
     /// Set of items that were ROLLed onto the stack from within the source stack.
     ///
     /// The ROLL operation removes the item from the target.
     /// We assume that each item occurs at most once in the source stack and in the target,
     /// so by induction we will never encounter this item again for any child state.
-    rolled: HashSet<Id>,
+    // TODO: Consider using FnvHashSet
+    rolled: Rc<HashSet<Id>>,
 }
 
 impl State {
@@ -283,7 +290,7 @@ impl State {
                     false => None,       // moved item
                 })
                 .collect(),
-            rolled: HashSet::new(),
+            rolled: Rc::new(HashSet::new()),
         }
     }
 
@@ -356,7 +363,7 @@ impl State {
                 .collect(),
             target,
             above,
-            rolled: self.rolled.clone(),
+            rolled: Rc::clone(&self.rolled),
         }
     }
 
@@ -373,12 +380,13 @@ impl State {
                 .collect(),
             target,
             above,
-            rolled: self
-                .rolled
-                .iter()
-                .copied()
-                .chain(std::iter::once(top0))
-                .collect(),
+            rolled: Rc::new(
+                self.rolled
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(top0))
+                    .collect(),
+            ),
         }
     }
 
@@ -1093,6 +1101,7 @@ mod tests {
         let cost = script_cost(script);
         let script_key = (source.to_vec(), target.to_vec());
 
+        // TODO: Consider arrayvec
         static OPTIMAL_SCRIPTS: LazyLock<Mutex<HashMap<(Vec<u8>, Vec<u8>), (Script, usize)>>> =
             LazyLock::new(|| Mutex::new(HashMap::new()));
 
