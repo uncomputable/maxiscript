@@ -1075,20 +1075,15 @@ mod tests {
             && multiset(&final_stack[..source.len()]) == multiset(source) // match source without respect to order
     }
 
-    // fn get_target_of_script(source: &[u8], script: &Script) -> Option<Vec<u8>> {
-    //     let mut final_stack = Vec::with_capacity(source.len());
-    //     final_stack.extend(source);
-    //     let result = run_script(&mut final_stack, script);
-    //
-    //     if result.is_ok()
-    //         && source.len() < final_stack.len()
-    //         && multiset(&final_stack[..source.len()]) == multiset(source)
-    //     {
-    //         Some(final_stack.split_off(source.len()))
-    //     } else {
-    //         None
-    //     }
-    // }
+    fn script_is_functional_copy2(source: &[u8], target: &[u8], script: &Script) -> bool {
+        let mut final_stack = Vec::with_capacity(source.len());
+        final_stack.extend(source);
+        let result = run_script(&mut final_stack, script);
+        result.is_ok()
+            && source.len() == final_stack.len()
+            && target == &final_stack[final_stack.len() - target.len()..] // match target precisely
+            && multiset(&final_stack) == multiset(source) // match source without respect to order
+    }
 
     fn script_is_shortest_copy(
         source: &[u8],
@@ -1133,6 +1128,48 @@ mod tests {
         Ok(())
     }
 
+    fn script_is_shortest_copy2(
+        source: &[u8],
+        target: &[u8],
+        script: &Script,
+    ) -> Result<(), Script> {
+        assert!(2 <= source.len() && source.len() <= 3);
+        assert!(target.len() <= source.len());
+
+        let cost = script_cost(script);
+        let script_key = (source.to_vec(), target.to_vec());
+
+        static OPTIMAL_SCRIPTS: LazyLock<Mutex<HashMap<(Vec<u8>, Vec<u8>), (Script, usize)>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+
+        let mut cache = OPTIMAL_SCRIPTS.lock().unwrap();
+
+        if !cache.contains_key(&script_key) {
+            let mut best_cost = usize::MAX;
+            let mut best_script = Vec::new();
+
+            for other_script in all_scripts(source.len() as u8, target.len() as u8)
+                .filter(|s| script_is_functional_copy2(source, target, s))
+            {
+                let other_cost = script_cost(&other_script);
+                if other_cost < best_cost {
+                    best_cost = other_cost;
+                    best_script = other_script;
+                }
+            }
+
+            debug_assert!(best_cost < usize::MAX, "there should be a best script");
+            cache.insert(script_key.clone(), (best_script, best_cost));
+        }
+
+        let (best_script, best_cost) = cache.get(&script_key).unwrap();
+        if *best_cost < cost {
+            return Err(best_script.clone());
+        }
+
+        Ok(())
+    }
+
     fn transformation_is_optimal(source: &[u8], target: &[u8]) {
         if let Some(script) = find_shortest_transformation(source, target) {
             if !script_is_functional_copy(source, target, &script) {
@@ -1141,6 +1178,22 @@ mod tests {
                 panic!("Script is not functional copy: {script:?}");
             }
             if let Err(other_script) = script_is_shortest_copy(source, target, &script) {
+                eprintln!("Source stack: {source:?}");
+                eprintln!("Target stack top: {target:?}");
+                eprintln!("Computed script: {script:?}");
+                panic!("Other script is better: {other_script:?}");
+            }
+        }
+    }
+
+    fn transformation_is_optimal2(source: &[u8], target: &[u8]) {
+        if let Some(script) = find_shortest_transformation2(source, target, &[]) {
+            if !script_is_functional_copy2(source, target, &script) {
+                eprintln!("Source stack: {source:?}");
+                eprintln!("Target stack top: {target:?}");
+                panic!("Script is not functional copy: {script:?}");
+            }
+            if let Err(other_script) = script_is_shortest_copy2(source, target, &script) {
                 eprintln!("Source stack: {source:?}");
                 eprintln!("Target stack top: {target:?}");
                 eprintln!("Computed script: {script:?}");
@@ -1186,6 +1239,22 @@ mod tests {
         let source = &[2, 1, 0];
         for target in (0..3).permutations(3) {
             transformation_is_optimal(source, &target);
+        }
+    }
+
+    #[test]
+    fn transformation_is_optimal_3_2_mov() {
+        let source = &[2, 1, 0];
+        for target in (0..3).permutations(2) {
+            transformation_is_optimal2(source, &target);
+        }
+    }
+
+    #[test]
+    fn transformation_is_optimal_3_3_mov() {
+        let source = &[2, 1, 0];
+        for target in (0..3).permutations(3) {
+            transformation_is_optimal2(source, &target);
         }
     }
 }
