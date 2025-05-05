@@ -1,8 +1,10 @@
-use crate::util;
-use itertools::Itertools;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::NonZero;
+
+use itertools::Itertools;
+
+use crate::util;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StackOp<T> {
@@ -119,7 +121,6 @@ pub fn find_shortest_transformation<T: Clone + Ord + fmt::Debug + std::hash::Has
     find_shortest_transformation2(source, target, target)
 }
 
-// TODO: Support OP_ROLL
 /// Computes a minimal Bitcoin script that puts the `target` on top of the `source` stack.
 ///
 /// After applying the script, the result stack consists of the `source` stack
@@ -221,21 +222,52 @@ const fn unify(a: Option<Id>, b: Option<Id>) -> Option<Id> {
     }
 }
 
+// TODO: Enable cheap copying using smart pointers: Rc / Cow / ...
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct State {
-    script: Vec<StackOp<Id>>,
-    /// Stack elements that are required to reach this state.
+    /// Sequence of stack operations that transforms this state
+    /// to the original target state.
     ///
-    /// `None` elements are free variables that match anything.
+    /// If this state matches the source stack,
+    /// then the sequence of stack operations transforms the source stack
+    /// into the result stack with the target on top.
+    ///
+    /// As in Bitcoin Script, the first operation appears first in the sequence.
+    script: Vec<StackOp<Id>>,
+    /// Items on top of the stack.
+    ///
+    /// A state doesn't match the entire source stack.
+    /// Instead, it matches the stack top in a fuzzy way.
+    /// Items that are `Some(x)` must exist as `x` in the stack.
+    /// Items that are `None` are free variables that match anything in the stack.
+    ///
+    /// The stack top is the last item.
     target: Vec<Option<Id>>,
     /// Maps indices from `self.target` to indices from the global `target`.
     ///
     /// The map is used to check if items that are produced by opcodes
     /// (such as `OP_DUP`) are on the list of copied items.
     /// Moved items are not relevant and stored as `None` in the map.
-    ///
     /// Remember that copied items are disjoint from the moved items.
+    ///
+    /// The last item in `self.above` corresponds to the last item in `self.target`;
+    /// the second-last item corresponds to the second-last item; and so on.
+    ///
+    /// ```text
+    /// [ ~~~~~ self.target ~~~~~ ]
+    ///              [ self.above ]
+    ///              ↓↓↓↓↓↓↓↓↓↓↓↓↓↓
+    ///              [ ~~~~~ target ~~~~~ ]
+    /// ```
+    ///
+    /// Leading `None` items can be omitted from the vector.
     above: Vec<Option<usize>>,
+    /// Set of items that were ROLLed onto the stack from within the source stack.
+    ///
+    /// The ROLL operation removes the item from the target.
+    /// We assume that each item occurs at most once in the source stack and in the target,
+    /// so by induction we will never encounter this item again for any child state.
+    rolled: HashSet<Id>,
 }
 
 impl State {
@@ -247,10 +279,11 @@ impl State {
                 .iter()
                 .enumerate()
                 .map(|(index, item)| match to_copy.iter().contains(item) {
-                    true => Some(index), // to-be-copied item
-                    false => None,       // to-be-moved item
+                    true => Some(index), // copied item
+                    false => None,       // moved item
                 })
                 .collect(),
+            rolled: HashSet::new(),
         }
     }
 
@@ -279,6 +312,7 @@ impl State {
 
     /// Checks if the state matches the given `source` stack and the given `target` stack top.
     pub fn matches(&self, source: &[Option<Id>]) -> bool {
+        // Any copied item has not yet been produced
         if self.above.iter().any(Option::is_some) {
             return false;
         }
@@ -287,11 +321,23 @@ impl State {
             return false;
         }
 
-        for (index, x) in self.target.iter().copied().enumerate() {
-            if let Some(x) = x {
-                if Some(x) != source[source.len() - self.target.len() + index] {
-                    return false;
+        let mut rolled_items = 0;
+        for (rev_index, target_item) in self.target.iter().rev().copied().enumerate() {
+            if target_item.is_none() {
+                continue;
+            }
+
+            // Skip over rolled items.
+            // Return first non-rolled item.
+            let source_item = loop {
+                match &source[source.len() - 1 - rev_index - rolled_items] {
+                    Some(x) if self.rolled.contains(x) => rolled_items += 1,
+                    x => break *x,
                 }
+            };
+
+            if target_item != source_item {
+                return false;
             }
         }
 
@@ -310,6 +356,29 @@ impl State {
                 .collect(),
             target,
             above,
+            rolled: self.rolled.clone(),
+        }
+    }
+
+    fn make_child_rolled(
+        &self,
+        op: StackOp<Id>,
+        target: Vec<Option<Id>>,
+        above: Vec<Option<usize>>,
+        top0: Id,
+    ) -> Self {
+        State {
+            script: std::iter::once(op)
+                .chain(self.script.iter().copied())
+                .collect(),
+            target,
+            above,
+            rolled: self
+                .rolled
+                .iter()
+                .copied()
+                .chain(std::iter::once(top0))
+                .collect(),
         }
     }
 
@@ -554,16 +623,19 @@ impl State {
     }
 
     pub fn reverse_apply2(&self, children: &mut Vec<Self>, target: &[Id]) {
-        // Require at least one copied item to be produced.
-        let (above_bottom, idx0) = match self.above.split_last_chunk() {
-            Some((above_bottom, &[Some(idx0)])) => (above_bottom, idx0),
+        let (bottom, top0) = match self.target.split_last_chunk() {
+            Some((bottom, &[Some(top0)])) => (bottom, top0),
+            _ => return,
+        };
+        let (above_bottom, maybe_idx0) = match self.above.split_last_chunk() {
+            Some((above_bottom, &[maybe_idx0])) => (above_bottom, maybe_idx0),
             _ => return,
         };
 
         // OP_PICK X
         //
         // [α X β] → [α X β X]
-        if let Some((bottom, &[Some(top0)])) = self.target.split_last_chunk() {
+        if let Some(idx0) = maybe_idx0 {
             if target[idx0] == top0 {
                 children.push(self.make_child(
                     StackOp::Pick(top0),
@@ -576,34 +648,64 @@ impl State {
         // OP_ROLL X
         //
         // [α       X β] → [α       β X]
-        // [α     2 1 0] → [α     1 0 2]
         // [α   3 2 1 0] → [α   2 1 0 3]
         // [α 4 3 2 1 0] → [α 3 2 1 0 4]
         // ...
-        // The following doesn't make sense:
-        // [α         0] → [α         0] (NOP)
-        // [α       1 0] → [α       0 1] (OP_SWAP is equivalent and cheaper)
         //
-        // Two possibilities:
-        // 1) X is taken from inside target (spawn one child for each position)
-        // 2) X is taken from outside target (spawn one extra child; consider this when extending target _ in future steps)
+        // OP_ROLL is never used for copied items, because it is cheaper to use OP_PICK instead.
+        if maybe_idx0.is_some() {
+            return;
+        }
+
+        // Possibility 1
+        // `top0` was ROLLed onto the stack from below the target.
+        children.push(self.make_child_rolled(
+            StackOp::Roll(top0),
+            Vec::from(bottom),
+            Vec::from(above_bottom),
+            top0,
+        ));
+
+        // Possibility 2
+        // `top0` was ROLLed onto the stack from within the target.
+        // `top0` must come from below one of the target items.
+        // `OP_ROLL n` makes sense only for `n ≥ 3`, because other opcodes are cheaper.
         //
-        // if let Some((bottom, &[Some(top0)])) = self.target.split_last_chunk() {
-        //     children.push(
-        //         self.make_child(
-        //             StackOp::Pick(top0),
-        //             Vec::from(bottom),
-        //             [Above::Push(top0)]
-        //                 .into_iter()
-        //                 .chain(self.above.iter().copied())
-        //                 .collect(),
-        //         ),
-        //     );
-        // }
+        // [α         0] → [α         0] (OP_ROLL 0 = NOP)
+        // [α       1 0] → [α       0 1] (OP_ROLL 1 = OP_SWAP)
+        // [α     2 1 0] → [α     1 0 2] (OP_ROLL 2 = OP_ROT)
+        let index_delta = self.target.len() - self.above.len();
+
+        for i in 0..bottom.len().saturating_sub(3) {
+            // [ ~~~~~ self.target ~~~~~ ]
+            //              [ self.above ]
+            let new_above = match i.checked_sub(index_delta) {
+                None => Vec::new(),
+                Some(j) => above_bottom[0..j]
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(None))
+                    .chain(above_bottom[j..].iter().copied())
+                    .collect(),
+            };
+            children.push(
+                self.make_child(
+                    StackOp::Roll(top0),
+                    bottom[0..i]
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(Some(top0)))
+                        .chain(bottom[i..].iter().copied())
+                        .collect(),
+                    new_above,
+                ),
+            );
+        }
     }
 }
 
 fn above_tuck(above_bottom: &[Option<usize>]) -> Option<Vec<Option<usize>>> {
+    // OP_TUCK = OP_SWAP OP_OVER
     above_swap(above_bottom)
 }
 
@@ -665,7 +767,7 @@ fn above_rot(above: &[Option<usize>]) -> Option<Vec<Option<usize>>> {
         // [2 | 1 0] --ROT-> [1 | 0 2]
         // 2, 1: moved item
         // 0: unrestrained
-        [idx0, None] => Some(vec![None, *idx0]),
+        [idx0, None] => Some(vec![*idx0]),
         [_, _] => None,
         _ => {
             let (before_above, &[idx1, idx0, idx2]) = above.split_last_chunk().unwrap();
@@ -696,12 +798,12 @@ fn above_2rot(above: &[Option<usize>]) -> Option<Vec<Option<usize>>> {
         // [5 4 3 | 2 1 0] --2ROT-> [3 2 1 | 0 5 4]
         // 5, 4, 3, 2, 1: moved items
         // 0: unrestrained
-        [idx0, None, None] => Some(vec![None, None, *idx0]),
+        [idx0, None, None] => Some(vec![*idx0]),
         [_, _, _] => None,
         // [5 4 | 3 2 1 0] --2ROT-> [3 2 | 1 0 5 4]
         // 5, 4, 3, 2: moved items
         // 1, 0: unrestrained
-        [idx1, idx0, None, None] => Some(vec![None, None, *idx1, *idx0]),
+        [idx1, idx0, None, None] => Some(vec![*idx1, *idx0]),
         [_, _, _, _] => None,
         // [5 | 4 3 2 1 0] --2ROT-> [3 | 2 1 0 5 4]
         // 5, 3: moved items
