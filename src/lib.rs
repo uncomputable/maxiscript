@@ -1,8 +1,9 @@
 use chumsky::Parser;
 use chumsky::prelude::{Input, Rich};
 
-use crate::parse::{Program, Span, Spanned, Token, lexer, program_parser};
+use crate::parse::{Span, Spanned, Token, lexer, program_parser};
 
+mod ast;
 mod compile;
 mod opcodes;
 mod optimize;
@@ -20,10 +21,14 @@ pub fn lex_program(src: &str) -> (Option<Vec<Spanned<Token>>>, Vec<Rich<char>>) 
 pub fn parse_program<'src>(
     src: &'src str,
     tokens: &'src [Spanned<Token<'src>>],
-) -> (Option<Program<'src>>, Vec<Rich<'src, Token<'src>>>) {
+) -> (Option<parse::Program<'src>>, Vec<Rich<'src, Token<'src>>>) {
     program_parser()
         .parse(tokens.map((src.len()..src.len()).into(), |(t, s)| (t, s)))
         .into_output_errors()
+}
+
+pub fn analyze<'src>(program: &parse::Program<'src>) -> Result<ast::Program<'src>, String> {
+    ast::Program::analyze(program)
 }
 
 pub fn parse_program_string(src: &str) -> Option<String> {

@@ -1,7 +1,7 @@
 use std::{env, fs};
 
 use ariadne::{Color, Label, Report, ReportKind, sources};
-use bitfony::{compile, lex_program, parse_program};
+use bitfony::{analyze, compile, lex_program, parse_program};
 use hex_conservative::DisplayHex;
 use log::info;
 
@@ -22,9 +22,16 @@ fn main() {
 
     if let Some(program) = program {
         info!("Compiling Bitfony program:\n{program}");
-        let script = compile(program).expect("should compile");
-        info!("Resulting Bitcoin script:\n{script:?}");
-        println!("{}", script.as_bytes().to_lower_hex_string());
+        match analyze(&program) {
+            Ok(program) => {
+                let script = compile(program).expect("should compile");
+                info!("Resulting Bitcoin script:\n{script:?}");
+                println!("{}", script.as_bytes().to_lower_hex_string());
+            }
+            Err(error) => {
+                println!("Analysis error: {error}");
+            }
+        }
     }
 
     lex_errs

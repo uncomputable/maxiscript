@@ -11,6 +11,12 @@ impl<T: ?Sized> ShallowClone for Arc<T> {
     }
 }
 
+impl<T: ShallowClone> ShallowClone for Option<T> {
+    fn shallow_clone(&self) -> Self {
+        self.as_ref().map(ShallowClone::shallow_clone)
+    }
+}
+
 /// Similar to [`std::slice::split_last_chunk`], but replace missing elements with `None`.
 #[allow(dead_code)]
 pub const fn split_last_chunk<const N: usize, T>(s: &[T]) -> (&[T], [Option<&T>; N]) {

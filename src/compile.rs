@@ -1,22 +1,17 @@
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use bitcoin::opcodes;
 use bitcoin::script::PushBytes;
-use itertools::Itertools;
 use log::{Level, debug, log_enabled};
 
+use crate::ast::{Expression, ExpressionInner, Program, Statement};
 use crate::opcodes::{self as myopcodes, StackOp};
 use crate::optimize;
-use crate::parse::{Expression, Program, Statement, VariableName};
+use crate::parse::VariableName;
 
 #[derive(Debug, Clone, Default)]
 struct Stack<'src> {
     variables: Vec<VariableName<'src>>,
-    /// Maps variables to their equivalent parent variable.
-    ///
-    /// All equivalent variables point to the same parent.
-    alias_resolver: HashMap<VariableName<'src>, VariableName<'src>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -47,15 +42,6 @@ impl<'src> Stack<'src> {
 
     pub fn remove_moved_variables(&mut self, to_copy: &[VariableName]) {
         self.variables.retain(|name| to_copy.contains(name));
-        self.alias_resolver
-            .retain(|_, parent| to_copy.contains(parent));
-    }
-
-    pub fn push_variable_alias(&mut self, aliased: VariableName<'src>, parent: VariableName<'src>) {
-        assert!(!self.alias_resolver.contains_key(aliased));
-
-        let transitive_parent = self.alias_resolver.get(parent).copied().unwrap_or(parent);
-        self.alias_resolver.insert(aliased, transitive_parent);
     }
 
     pub fn variables(&self) -> &[VariableName<'src>] {
@@ -86,65 +72,6 @@ impl<'src> Stack<'src> {
     }
 }
 
-/// A Bitcoin Script opcode that is a builtin function in the DSL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Builtin(opcodes::Opcode);
-
-impl std::hash::Hash for Builtin {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write_u8(self.0.to_u8());
-    }
-}
-
-impl FromStr for Builtin {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let ret = match s {
-            "add" => Self(opcodes::all::OP_ADD),
-            "equal_verify" => Self(opcodes::all::OP_EQUALVERIFY),
-            _ => return Err(()),
-        };
-        Ok(ret)
-    }
-}
-
-impl Builtin {
-    // /// Gets the number of arguments of the opcode.
-    // ///
-    // /// Arguments are popped from the stack.
-    // pub const fn n_args(self) -> usize {
-    //     match self.0 {
-    //         opcodes::all::OP_ADD => 2,
-    //         opcodes::all::OP_EQUALVERIFY => 2,
-    //         _ => 0,
-    //     }
-    // }
-
-    /// Gets the number of return values of the opcode.
-    ///
-    /// Return values are pushed onto the stack.
-    pub const fn n_rets(self) -> usize {
-        match self.0 {
-            opcodes::all::OP_ADD => 1,
-            opcodes::all::OP_EQUALVERIFY => 0,
-            _ => 0,
-        }
-    }
-
-    /// Checks if the opcode is a unit operation.
-    ///
-    /// Unit operations return nothing.
-    pub const fn is_unit(self) -> bool {
-        self.n_rets() == 0
-    }
-
-    /// Returns the corresponding [`bitcoin::Opcode`].
-    pub const fn to_opcode(self) -> bitcoin::Opcode {
-        self.0
-    }
-}
-
 struct Dependencies<'a, 'src> {
     depends_on: HashMap<&'a Statement<'src>, Vec<&'a Statement<'src>>>,
     uses_variables: HashMap<&'a Statement<'src>, Vec<VariableName<'src>>>,
@@ -163,17 +90,20 @@ fn get_statement_dependencies<'src, 'a: 'src>(
         let expr = match statement {
             Statement::Assignment(ass) => {
                 var_defined_in.insert(ass.assignee(), statement);
-                ass.expression()
+                match ass.expression() {
+                    None => continue,
+                    Some(x) => x,
+                }
             }
             Statement::UnitExpr(expr) => expr,
         };
-        match expr {
-            Expression::Variable(x) => {
+        match expr.inner() {
+            ExpressionInner::Variable(x) => {
                 let &stmt_x = var_defined_in.get(x).expect("var defined");
                 depends_on.insert(statement, vec![stmt_x]);
                 uses_variables.insert(statement, vec![x]);
             }
-            Expression::Call(call) => {
+            ExpressionInner::Call(call) => {
                 let stmts = call
                     .args()
                     .iter()
@@ -182,7 +112,7 @@ fn get_statement_dependencies<'src, 'a: 'src>(
                 depends_on.insert(statement, stmts);
                 uses_variables.insert(statement, call.args().to_vec());
             }
-            Expression::Bytes(_) => {
+            ExpressionInner::Bytes(_) => {
                 depends_on.insert(statement, vec![]);
             }
         }
@@ -215,28 +145,15 @@ pub fn compile(program: Program) -> Result<bitcoin::ScriptBuf, String> {
                 .collect();
 
             match statement {
-                Statement::Assignment(ass) => match ass.expression() {
-                    Expression::Variable(parent) => {
-                        stack.push_variable_alias(ass.assignee(), parent);
-                    }
-                    _ => {
-                        compile_expr(ass.expression(), &mut script, &mut stack, &to_copy)?;
+                Statement::Assignment(ass) => {
+                    if let Some(expr) = ass.expression() {
+                        compile_expr(expr, &mut script, &mut stack, &to_copy)?;
                         stack.push_variable(ass.assignee())?;
                     }
-                },
-                Statement::UnitExpr(expr) => match expr {
-                    Expression::Variable(..) | Expression::Bytes(..) => {
-                        return Err("Expression is not unit".to_string());
-                    }
-                    Expression::Call(call) => {
-                        let name = Builtin::from_str(call.name()).expect("unexpected opcode");
-                        if !name.is_unit() {
-                            return Err("Expression is not unit".to_string());
-                        } else {
-                            compile_expr(expr, &mut script, &mut stack, &to_copy)?;
-                        }
-                    }
-                },
+                }
+                Statement::UnitExpr(expr) => {
+                    compile_expr(expr, &mut script, &mut stack, &to_copy)?;
+                }
             }
         }
 
@@ -245,13 +162,7 @@ pub fn compile(program: Program) -> Result<bitcoin::ScriptBuf, String> {
             best_script = script;
 
             if log_enabled!(Level::Debug) {
-                debug!(
-                    "Found better statement order (cost {best_cost}):\n{}",
-                    ordered_statements
-                        .iter()
-                        .map(|stmt| stmt.to_string())
-                        .join("\n")
-                )
+                debug!("Found better statement order (cost {best_cost}):\n")
             }
         }
     }
@@ -265,28 +176,21 @@ fn compile_expr(
     stack: &mut Stack,
     to_copy: &[VariableName],
 ) -> Result<(), String> {
-    match expr {
-        Expression::Variable(..) => {
-            unreachable!("variable alias should be caught by previous code")
+    match expr.inner() {
+        ExpressionInner::Variable(..) => {
+            unreachable!("variable alias should be inlined")
         }
-        Expression::Bytes(bytes) => {
+        ExpressionInner::Bytes(bytes) => {
             let bounded_bytes: &PushBytes = bytes
                 .as_ref()
                 .try_into()
                 .expect("hex should not be too long");
             script.push_slice(bounded_bytes);
         }
-        Expression::Call(call) => {
-            // TODO: Check during AST construction
-            let name = Builtin::from_str(call.name()).expect("unexpected opcode");
-            assert!(
-                name.n_rets() <= 1,
-                "No support for operations that push multiple outputs"
-            );
-
+        ExpressionInner::Call(call) => {
             match myopcodes::find_shortest_transformation2(stack.variables(), call.args(), to_copy)
             {
-                None => return Err("Variable was not defined".to_string()),
+                None => unreachable!("variables should be defined"),
                 Some(transformation_script) => {
                     let mut pushed_args = 0;
 
@@ -338,7 +242,7 @@ fn compile_expr(
                 }
             }
 
-            script.push_opcode(name.to_opcode());
+            script.push_opcode(call.name().to_opcode());
         }
     }
 
