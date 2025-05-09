@@ -213,14 +213,14 @@ pub struct Call<'src> {
     args: Arc<[VariableName<'src>]>,
 }
 
-impl Call<'_> {
+impl<'src> Call<'src> {
     /// Gets the name of the called function.
-    pub fn name(&self) -> &OpcodeName {
+    pub fn name(&self) -> &OpcodeName<'src> {
         &self.name
     }
 
     /// Gets the arguments of the function call.
-    pub fn args(&self) -> &[VariableName] {
+    pub fn args(&self) -> &Arc<[VariableName<'src>]> {
         &self.args
     }
 }
@@ -228,7 +228,7 @@ impl Call<'_> {
 impl fmt::Display for Call<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "op::{}(", self.name)?;
-        for (index, arg) in self.args().iter().enumerate() {
+        for (index, arg) in self.args.iter().enumerate() {
             write!(f, "{arg}")?;
             if index < self.args().len() - 1 {
                 write!(f, ", ")?;
@@ -242,7 +242,7 @@ impl ShallowClone for Call<'_> {
     fn shallow_clone(&self) -> Self {
         Self {
             name: self.name,
-            args: Arc::clone(&self.args),
+            args: self.args.shallow_clone(),
         }
     }
 }

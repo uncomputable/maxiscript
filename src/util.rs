@@ -1,6 +1,14 @@
+use std::sync::Arc;
+
 pub trait ShallowClone {
     /// Create a cheap copy of the value.
     fn shallow_clone(&self) -> Self;
+}
+
+impl<T: ?Sized> ShallowClone for Arc<T> {
+    fn shallow_clone(&self) -> Self {
+        Arc::clone(self)
+    }
 }
 
 /// Similar to [`std::slice::split_last_chunk`], but replace missing elements with `None`.
