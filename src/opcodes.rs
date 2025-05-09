@@ -147,10 +147,6 @@ pub fn find_shortest_transformation2<T: Clone + Ord + fmt::Debug + std::hash::Ha
     if target.iter().any(|x| !source.contains(x)) {
         return None;
     }
-    // Bail out if to_copy is not subset of the target
-    if to_copy.iter().any(|x| !target.contains(x)) {
-        return None;
-    }
     // Bail out if target is too long
     if usize::from(u8::MAX) <= target.len() {
         return None;
@@ -158,7 +154,8 @@ pub fn find_shortest_transformation2<T: Clone + Ord + fmt::Debug + std::hash::Ha
 
     let (mapped_target, map, map_back) = get_maps(target);
     let mapped_source = apply_map(source, &map);
-    let mapped_to_copy: Vec<Id> = to_copy.iter().map(|x| *map.get(x).unwrap()).collect();
+    // Ignore items in `to_copy` that are not in `target`
+    let mapped_to_copy: Vec<Id> = to_copy.iter().filter_map(|x| map.get(x)).copied().collect();
     let mapped_script =
         find_shortest_transformation_(&mapped_source, &mapped_target, &mapped_to_copy);
 

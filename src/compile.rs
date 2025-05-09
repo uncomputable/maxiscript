@@ -4,7 +4,7 @@ use bitcoin::script::PushBytes;
 use itertools::Itertools;
 use log::{Level, debug, log_enabled};
 
-use crate::opcodes::{StackOp, find_shortest_transformation};
+use crate::opcodes::{self, StackOp};
 use crate::optimize;
 use crate::parse::{Expression, Program, Statement, VariableName};
 
@@ -40,6 +40,10 @@ impl<'src> Stack<'src> {
         Ok(())
     }
 
+    pub fn remove_moved_variables(&mut self, to_copy: &[VariableName]) {
+        self.variables.retain(|name| to_copy.contains(name));
+    }
+
     // pub fn push_alias(&mut self, original: VariableName<'src>, alias: VariableName<'src>)
 
     pub fn variables(&self) -> &[VariableName<'src>] {
@@ -70,11 +74,19 @@ impl<'src> Stack<'src> {
     }
 }
 
-fn get_statement_dependencies<'a, 'src>(
+struct Dependencies<'a, 'src> {
+    depends_on: HashMap<&'a Statement<'src>, Vec<&'a Statement<'src>>>,
+    uses_variables: HashMap<&'a Statement<'src>, Vec<VariableName<'src>>>,
+}
+
+fn get_statement_dependencies<'src, 'a: 'src>(
     program: &'a Program<'src>,
-) -> HashMap<&'a Statement<'src>, Vec<&'a Statement<'src>>> {
-    let mut var_defined_in = HashMap::new();
-    let mut depends_on = HashMap::new();
+) -> Dependencies<'a, 'src> {
+    let mut var_defined_in: HashMap<VariableName, &Statement> = HashMap::new();
+    let mut depends_on: HashMap<&Statement, Vec<&Statement>> =
+        HashMap::with_capacity(program.statements().len());
+    let mut uses_variables: HashMap<&Statement, Vec<VariableName>> =
+        HashMap::with_capacity(program.statements().len());
 
     for statement in program.statements().iter() {
         let expr = match statement {
@@ -88,6 +100,7 @@ fn get_statement_dependencies<'a, 'src>(
             Expression::Variable(x) => {
                 let &stmt_x = var_defined_in.get(x).expect("var defined");
                 depends_on.insert(statement, vec![stmt_x]);
+                uses_variables.insert(statement, vec![x]);
             }
             Expression::Call(call) => {
                 let stmts = call
@@ -96,6 +109,7 @@ fn get_statement_dependencies<'a, 'src>(
                     .map(|var| *var_defined_in.get(var).expect("var defined"))
                     .collect();
                 depends_on.insert(statement, stmts);
+                uses_variables.insert(statement, call.args().to_vec());
             }
             Expression::Bytes(_) => {
                 depends_on.insert(statement, vec![]);
@@ -103,23 +117,35 @@ fn get_statement_dependencies<'a, 'src>(
         }
     }
 
-    depends_on
+    Dependencies {
+        depends_on,
+        uses_variables,
+    }
 }
 
 pub fn compile(program: Program) -> Result<bitcoin::ScriptBuf, String> {
-    let depends_on = get_statement_dependencies(&program);
+    let dependencies = get_statement_dependencies(&program);
 
     let mut best_script = bitcoin::ScriptBuf::new();
-    let mut best_len = usize::MAX;
+    let mut best_cost = usize::MAX;
 
-    for ordered_statements in optimize::all_topological_orders(&depends_on) {
+    for ordered_statements in optimize::all_topological_orders(&dependencies.depends_on) {
         let mut script = bitcoin::ScriptBuf::new();
         let mut stack = Stack::default();
 
-        for statement in ordered_statements.iter() {
+        for i in 0..ordered_statements.len() {
+            let statement = ordered_statements[i];
+            // TODO: to_copy can be cached
+            let to_copy: Vec<VariableName> = ordered_statements[i + 1..]
+                .iter()
+                .filter_map(|&&stmt| dependencies.uses_variables.get(stmt))
+                .flatten()
+                .copied()
+                .collect();
+
             match statement {
                 Statement::Assignment(ass) => {
-                    compile_expr(ass.expression(), &mut script, &mut stack)?;
+                    compile_expr(ass.expression(), &mut script, &mut stack, &to_copy)?;
                     stack.push_variable(ass.assignee())?;
                 }
                 Statement::UnitExpr(expr) => match expr {
@@ -129,18 +155,18 @@ pub fn compile(program: Program) -> Result<bitcoin::ScriptBuf, String> {
                     Expression::Call(call) if !call.name().is_unit() => {
                         return Err("Expression is not unit".to_string());
                     }
-                    _ => compile_expr(expr, &mut script, &mut stack)?,
+                    _ => compile_expr(expr, &mut script, &mut stack, &to_copy)?,
                 },
             }
         }
 
-        if script.len() < best_len {
-            best_len = script.len();
+        if script.len() < best_cost {
+            best_cost = script.len();
             best_script = script;
 
             if log_enabled!(Level::Debug) {
                 debug!(
-                    "Found better statement order:\n{}",
+                    "Found better statement order (cost {best_cost}):\n{}",
                     ordered_statements
                         .iter()
                         .map(|stmt| stmt.to_string())
@@ -157,6 +183,7 @@ fn compile_expr(
     expr: &Expression<'_>,
     script: &mut bitcoin::ScriptBuf,
     stack: &mut Stack,
+    to_copy: &[VariableName],
 ) -> Result<(), String> {
     match expr {
         Expression::Variable(..) => unimplemented!("variable aliases"),
@@ -173,7 +200,7 @@ fn compile_expr(
                 "No support for operations that push multiple outputs"
             );
 
-            match find_shortest_transformation(stack.variables(), call.args()) {
+            match opcodes::find_shortest_transformation2(stack.variables(), call.args(), to_copy) {
                 None => return Err("Variable was not defined".to_string()),
                 Some(transformation_script) => {
                     let mut pushed_args = 0;
@@ -230,5 +257,6 @@ fn compile_expr(
         }
     }
 
+    stack.remove_moved_variables(to_copy);
     Ok(())
 }
