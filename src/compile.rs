@@ -11,7 +11,10 @@ use crate::parse::{Expression, Program, Statement, VariableName};
 #[derive(Debug, Clone, Default)]
 struct Stack<'src> {
     variables: Vec<VariableName<'src>>,
-    // aliases: HashMap<VariableName<'src>, Vec<VariableName<'src>>>,
+    /// Maps variables to their equivalent parent variable.
+    ///
+    /// All equivalent variables point to the same parent.
+    alias_resolver: HashMap<VariableName<'src>, VariableName<'src>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -42,9 +45,16 @@ impl<'src> Stack<'src> {
 
     pub fn remove_moved_variables(&mut self, to_copy: &[VariableName]) {
         self.variables.retain(|name| to_copy.contains(name));
+        self.alias_resolver
+            .retain(|_, parent| to_copy.contains(parent));
     }
 
-    // pub fn push_alias(&mut self, original: VariableName<'src>, alias: VariableName<'src>)
+    pub fn push_variable_alias(&mut self, aliased: VariableName<'src>, parent: VariableName<'src>) {
+        assert!(!self.alias_resolver.contains_key(aliased));
+
+        let transitive_parent = self.alias_resolver.get(parent).copied().unwrap_or(parent);
+        self.alias_resolver.insert(aliased, transitive_parent);
+    }
 
     pub fn variables(&self) -> &[VariableName<'src>] {
         &self.variables
@@ -69,7 +79,7 @@ impl<'src> Stack<'src> {
         } else if pos <= u32::MAX as usize {
             Some(Position::U32([b0, b1, b2, b3]))
         } else {
-            panic!("Script larger than u32::MAX opcode long")
+            panic!("Stack size exceeded u32::MAX");
         }
     }
 }
@@ -144,10 +154,15 @@ pub fn compile(program: Program) -> Result<bitcoin::ScriptBuf, String> {
                 .collect();
 
             match statement {
-                Statement::Assignment(ass) => {
-                    compile_expr(ass.expression(), &mut script, &mut stack, &to_copy)?;
-                    stack.push_variable(ass.assignee())?;
-                }
+                Statement::Assignment(ass) => match ass.expression() {
+                    Expression::Variable(parent) => {
+                        stack.push_variable_alias(ass.assignee(), parent);
+                    }
+                    _ => {
+                        compile_expr(ass.expression(), &mut script, &mut stack, &to_copy)?;
+                        stack.push_variable(ass.assignee())?;
+                    }
+                },
                 Statement::UnitExpr(expr) => match expr {
                     Expression::Variable(..) | Expression::Bytes(..) => {
                         return Err("Expression is not unit".to_string());
@@ -186,7 +201,9 @@ fn compile_expr(
     to_copy: &[VariableName],
 ) -> Result<(), String> {
     match expr {
-        Expression::Variable(..) => unimplemented!("variable aliases"),
+        Expression::Variable(..) => {
+            unreachable!("variable alias should be caught by previous code")
+        }
         Expression::Bytes(bytes) => {
             let bounded_bytes: &PushBytes = bytes
                 .as_ref()
