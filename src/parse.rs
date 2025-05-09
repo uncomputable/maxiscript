@@ -1,13 +1,14 @@
 use std::fmt;
 use std::sync::Arc;
 
-use bitcoin::script::PushBytesBuf;
 use chumsky::input::ValueInput;
 use chumsky::prelude::{
     IterParser, Rich, SimpleSpan, any, end, just, one_of, recursive, skip_then_retry_until,
 };
 use chumsky::{Parser, extra, select, text};
 use hex_conservative::{DisplayHex, FromHex};
+
+use crate::util::ShallowClone;
 
 pub type Span = SimpleSpan;
 pub type Spanned<T> = (T, Span);
@@ -100,6 +101,14 @@ impl fmt::Display for Program<'_> {
     }
 }
 
+impl ShallowClone for Program<'_> {
+    fn shallow_clone(&self) -> Self {
+        Self {
+            statements: Arc::clone(&self.statements),
+        }
+    }
+}
+
 /// A statement is either an assignment or a unit expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Statement<'src> {
@@ -114,6 +123,15 @@ impl fmt::Display for Statement<'_> {
         match self {
             Statement::Assignment(ass) => write!(f, "{ass};"),
             Statement::UnitExpr(expr) => write!(f, "{expr};"),
+        }
+    }
+}
+
+impl ShallowClone for Statement<'_> {
+    fn shallow_clone(&self) -> Self {
+        match self {
+            Self::Assignment(ass) => Self::Assignment(ass.shallow_clone()),
+            Self::UnitExpr(expr) => Self::UnitExpr(expr.shallow_clone()),
         }
     }
 }
@@ -145,13 +163,22 @@ impl fmt::Display for Assignment<'_> {
     }
 }
 
+impl ShallowClone for Assignment<'_> {
+    fn shallow_clone(&self) -> Self {
+        Self {
+            variable: self.variable,
+            expression: self.expression.shallow_clone(),
+        }
+    }
+}
+
 /// An expression produces an output value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expression<'src> {
     /// Return the value of a variable.
     Variable(VariableName<'src>),
     /// Return constant bytes.
-    Bytes(PushBytesBuf),
+    Bytes(Arc<[u8]>),
     /// Return the output of a function call.
     Call(Call<'src>),
 }
@@ -160,8 +187,18 @@ impl fmt::Display for Expression<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expression::Variable(name) => write!(f, "{name}"),
-            Expression::Bytes(bytes) => write!(f, "0x{}", bytes.as_bytes().to_lower_hex_string()),
+            Expression::Bytes(bytes) => write!(f, "0x{}", bytes.to_lower_hex_string()),
             Expression::Call(call) => write!(f, "{call}"),
+        }
+    }
+}
+
+impl ShallowClone for Expression<'_> {
+    fn shallow_clone(&self) -> Self {
+        match self {
+            Self::Variable(name) => Self::Variable(name),
+            Self::Bytes(bytes) => Self::Bytes(Arc::clone(bytes)),
+            Self::Call(call) => Self::Call(call.shallow_clone()),
         }
     }
 }
@@ -195,6 +232,15 @@ impl fmt::Display for Call<'_> {
             }
         }
         write!(f, ")")
+    }
+}
+
+impl ShallowClone for Call<'_> {
+    fn shallow_clone(&self) -> Self {
+        Self {
+            name: self.name,
+            args: Arc::clone(&self.args),
+        }
     }
 }
 
@@ -299,10 +345,7 @@ where
         let bytes_expr = select! { Token::Hex(s) => s }.map(|s| {
             debug_assert_eq!(s.len() % 2, 0, "there should be pairs of hex characters");
             let vec = Vec::<u8>::from_hex(s).expect("string should be hex");
-            // TODO: Handle failure case when hex is too long
-            let push_bytes =
-                bitcoin::script::PushBytesBuf::try_from(vec).expect("hex should not be too long");
-            Expression::Bytes(push_bytes)
+            Expression::Bytes(Arc::from(vec))
         });
 
         let expr_with_parentheses = expr

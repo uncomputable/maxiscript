@@ -160,7 +160,13 @@ fn compile_expr(
 ) -> Result<(), String> {
     match expr {
         Expression::Variable(..) => unimplemented!("variable aliases"),
-        Expression::Bytes(bytes) => script.push_slice(bytes),
+        Expression::Bytes(bytes) => {
+            let bounded_bytes: &PushBytes = bytes
+                .as_ref()
+                .try_into()
+                .expect("hex should not be too long");
+            script.push_slice(bounded_bytes);
+        }
         Expression::Call(call) => {
             assert!(
                 call.name().n_rets() <= 1,

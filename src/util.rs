@@ -1,3 +1,8 @@
+pub trait ShallowClone {
+    /// Create a cheap copy of the value.
+    fn shallow_clone(&self) -> Self;
+}
+
 /// Similar to [`std::slice::split_last_chunk`], but replace missing elements with `None`.
 #[allow(dead_code)]
 pub const fn split_last_chunk<const N: usize, T>(s: &[T]) -> (&[T], [Option<&T>; N]) {
