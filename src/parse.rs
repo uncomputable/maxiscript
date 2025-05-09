@@ -44,6 +44,7 @@ pub fn lexer<'src>()
                 .repeated()
                 .exactly(2)
                 .repeated()
+                .at_least(1)
                 .to_slice(),
         )
         .map(Token::Hex);
@@ -203,10 +204,12 @@ impl ShallowClone for Expression<'_> {
     }
 }
 
+pub type OpcodeName<'src> = &'src str;
+
 /// A call runs a function with given arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Call<'src> {
-    name: OpcodeName,
+    name: OpcodeName<'src>,
     args: Arc<[VariableName<'src>]>,
 }
 
@@ -224,7 +227,7 @@ impl Call<'_> {
 
 impl fmt::Display for Call<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}(", self.name)?;
+        write!(f, "op::{}(", self.name)?;
         for (index, arg) in self.args().iter().enumerate() {
             write!(f, "{arg}")?;
             if index < self.args().len() - 1 {
@@ -240,59 +243,6 @@ impl ShallowClone for Call<'_> {
         Self {
             name: self.name,
             args: Arc::clone(&self.args),
-        }
-    }
-}
-
-/// The name of an opcode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum OpcodeName {
-    Add,
-    EqualVerify,
-}
-
-impl OpcodeName {
-    /// Gets the number of arguments of the opcode.
-    ///
-    /// Arguments are popped from the stack.
-    pub const fn n_args(self) -> usize {
-        match self {
-            OpcodeName::Add => 2,
-            OpcodeName::EqualVerify => 2,
-        }
-    }
-
-    /// Gets the number of return values of the opcode.
-    ///
-    /// Return values are pushed onto the stack.
-    pub const fn n_rets(self) -> usize {
-        match self {
-            OpcodeName::Add => 1,
-            OpcodeName::EqualVerify => 0,
-        }
-    }
-
-    /// Checks if the opcode is a unit operation.
-    ///
-    /// Unit operations return nothing.
-    pub const fn is_unit(self) -> bool {
-        self.n_rets() == 0
-    }
-
-    /// Returns the corresponding [`bitcoin::Opcode`].
-    pub const fn to_opcode(self) -> bitcoin::Opcode {
-        match self {
-            OpcodeName::Add => bitcoin::opcodes::all::OP_ADD,
-            OpcodeName::EqualVerify => bitcoin::opcodes::all::OP_EQUALVERIFY,
-        }
-    }
-}
-
-impl fmt::Display for OpcodeName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Add => f.write_str("op::add"),
-            Self::EqualVerify => f.write_str("op::equal_verify"),
         }
     }
 }
@@ -339,26 +289,25 @@ where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
     recursive(|expr| {
-        let variable = select! { Token::Identifier(name) => name };
-        let variable_expr = variable.map(Expression::Variable);
+        let variable = select! { Token::Identifier(name) => name }.labelled("variable name");
+        let variable_expr = variable.map(Expression::Variable).labelled("variable");
 
-        let bytes_expr = select! { Token::Hex(s) => s }.map(|s| {
-            debug_assert_eq!(s.len() % 2, 0, "there should be pairs of hex characters");
-            let vec = Vec::<u8>::from_hex(s).expect("string should be hex");
-            Expression::Bytes(Arc::from(vec))
-        });
+        let bytes_expr = select! { Token::Hex(s) => s }
+            .map(|s| match Vec::<u8>::from_hex(s) {
+                Ok(bytes) => Expression::Bytes(Arc::from(bytes)),
+                Err(_) => unreachable!("there should be pairs of hex characters"),
+            })
+            .labelled("hex literal");
 
         let expr_with_parentheses = expr
             .clone()
-            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')));
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+            .labelled("parentheses");
 
         // Expressions at base of parse tree, which don't contain other expressions.
         let base_expr = variable_expr.or(bytes_expr).or(expr_with_parentheses);
 
-        let function_name = select! {
-            Token::Opcode("add") => OpcodeName::Add,
-            Token::Opcode("equal_verify") => OpcodeName::EqualVerify,
-        };
+        let function_name = select! { Token::Opcode(name) => name }.labelled("opcode name");
 
         let variable_sequence = variable
             .separated_by(just(Token::Ctrl(',')))
@@ -370,7 +319,8 @@ where
                 name,
                 args: Arc::from(args),
             })
-            .map(Expression::Call);
+            .map(Expression::Call)
+            .labelled("function call");
 
         base_expr.or(call)
     })

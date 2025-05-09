@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 
+use bitcoin::opcodes;
 use bitcoin::script::PushBytes;
 use itertools::Itertools;
 use log::{Level, debug, log_enabled};
 
-use crate::opcodes::{self, StackOp};
+use crate::opcodes::{self as myopcodes, StackOp};
 use crate::optimize;
 use crate::parse::{Expression, Program, Statement, VariableName};
 
@@ -81,6 +83,65 @@ impl<'src> Stack<'src> {
         } else {
             panic!("Stack size exceeded u32::MAX");
         }
+    }
+}
+
+/// A Bitcoin Script opcode that is a builtin function in the DSL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Builtin(opcodes::Opcode);
+
+impl std::hash::Hash for Builtin {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u8(self.0.to_u8());
+    }
+}
+
+impl FromStr for Builtin {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let ret = match s {
+            "add" => Self(opcodes::all::OP_ADD),
+            "equal_verify" => Self(opcodes::all::OP_EQUALVERIFY),
+            _ => return Err(()),
+        };
+        Ok(ret)
+    }
+}
+
+impl Builtin {
+    // /// Gets the number of arguments of the opcode.
+    // ///
+    // /// Arguments are popped from the stack.
+    // pub const fn n_args(self) -> usize {
+    //     match self.0 {
+    //         opcodes::all::OP_ADD => 2,
+    //         opcodes::all::OP_EQUALVERIFY => 2,
+    //         _ => 0,
+    //     }
+    // }
+
+    /// Gets the number of return values of the opcode.
+    ///
+    /// Return values are pushed onto the stack.
+    pub const fn n_rets(self) -> usize {
+        match self.0 {
+            opcodes::all::OP_ADD => 1,
+            opcodes::all::OP_EQUALVERIFY => 0,
+            _ => 0,
+        }
+    }
+
+    /// Checks if the opcode is a unit operation.
+    ///
+    /// Unit operations return nothing.
+    pub const fn is_unit(self) -> bool {
+        self.n_rets() == 0
+    }
+
+    /// Returns the corresponding [`bitcoin::Opcode`].
+    pub const fn to_opcode(self) -> bitcoin::Opcode {
+        self.0
     }
 }
 
@@ -167,10 +228,14 @@ pub fn compile(program: Program) -> Result<bitcoin::ScriptBuf, String> {
                     Expression::Variable(..) | Expression::Bytes(..) => {
                         return Err("Expression is not unit".to_string());
                     }
-                    Expression::Call(call) if !call.name().is_unit() => {
-                        return Err("Expression is not unit".to_string());
+                    Expression::Call(call) => {
+                        let name = Builtin::from_str(call.name()).expect("unexpected opcode");
+                        if !name.is_unit() {
+                            return Err("Expression is not unit".to_string());
+                        } else {
+                            compile_expr(expr, &mut script, &mut stack, &to_copy)?;
+                        }
                     }
-                    _ => compile_expr(expr, &mut script, &mut stack, &to_copy)?,
                 },
             }
         }
@@ -212,36 +277,39 @@ fn compile_expr(
             script.push_slice(bounded_bytes);
         }
         Expression::Call(call) => {
+            // TODO: Check during AST construction
+            let name = Builtin::from_str(call.name()).expect("unexpected opcode");
             assert!(
-                call.name().n_rets() <= 1,
+                name.n_rets() <= 1,
                 "No support for operations that push multiple outputs"
             );
 
-            match opcodes::find_shortest_transformation2(stack.variables(), call.args(), to_copy) {
+            match myopcodes::find_shortest_transformation2(stack.variables(), call.args(), to_copy)
+            {
                 None => return Err("Variable was not defined".to_string()),
                 Some(transformation_script) => {
                     let mut pushed_args = 0;
 
                     for op in transformation_script.iter() {
                         let opcode = match op {
-                            StackOp::Dup => bitcoin::opcodes::all::OP_DUP,
-                            StackOp::_2Dup => bitcoin::opcodes::all::OP_2DUP,
-                            StackOp::_3Dup => bitcoin::opcodes::all::OP_3DUP,
-                            StackOp::Over => bitcoin::opcodes::all::OP_OVER,
-                            StackOp::_2Over => bitcoin::opcodes::all::OP_2OVER,
-                            StackOp::Tuck => bitcoin::opcodes::all::OP_TUCK,
+                            StackOp::Dup => opcodes::all::OP_DUP,
+                            StackOp::_2Dup => opcodes::all::OP_2DUP,
+                            StackOp::_3Dup => opcodes::all::OP_3DUP,
+                            StackOp::Over => opcodes::all::OP_OVER,
+                            StackOp::_2Over => opcodes::all::OP_2OVER,
+                            StackOp::Tuck => opcodes::all::OP_TUCK,
                             StackOp::Pick(name) => {
                                 script.push_slice(
                                     stack
                                         .position(name, pushed_args)
                                         .expect("variable should be defined"),
                                 );
-                                bitcoin::opcodes::all::OP_PICK
+                                opcodes::all::OP_PICK
                             }
-                            StackOp::Swap => bitcoin::opcodes::all::OP_SWAP,
-                            StackOp::_2Swap => bitcoin::opcodes::all::OP_2SWAP,
-                            StackOp::Rot => bitcoin::opcodes::all::OP_ROT,
-                            StackOp::_2Rot => bitcoin::opcodes::all::OP_2ROT,
+                            StackOp::Swap => opcodes::all::OP_SWAP,
+                            StackOp::_2Swap => opcodes::all::OP_2SWAP,
+                            StackOp::Rot => opcodes::all::OP_ROT,
+                            StackOp::_2Rot => opcodes::all::OP_2ROT,
                             StackOp::Roll(name) => {
                                 // TODO: What if OP_ROLL uses variables inside target?
                                 script.push_slice(
@@ -249,7 +317,7 @@ fn compile_expr(
                                         .position(name, pushed_args)
                                         .expect("variable should be defined"),
                                 );
-                                bitcoin::opcodes::all::OP_ROLL
+                                opcodes::all::OP_ROLL
                             }
                         };
                         script.push_opcode(opcode);
@@ -270,7 +338,7 @@ fn compile_expr(
                 }
             }
 
-            script.push_opcode(call.name().to_opcode());
+            script.push_opcode(name.to_opcode());
         }
     }
 
