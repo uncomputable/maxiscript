@@ -91,7 +91,7 @@ fn get_statement_dependencies<'a, 'src>(
             }
             Expression::Call(call) => {
                 let stmts = call
-                    .args_target()
+                    .args()
                     .iter()
                     .map(|var| *var_defined_in.get(var).expect("var defined"))
                     .collect();
@@ -167,12 +167,12 @@ fn compile_expr(
                 "No support for operations that push multiple outputs"
             );
 
-            match find_shortest_transformation(stack.variables(), call.args_target()) {
+            match find_shortest_transformation(stack.variables(), call.args()) {
                 None => return Err("Variable was not defined".to_string()),
-                Some(trans_script) => {
+                Some(transformation_script) => {
                     let mut pushed_args = 0;
 
-                    for op in trans_script.iter() {
+                    for op in transformation_script.iter() {
                         let opcode = match op {
                             StackOp::Dup => bitcoin::opcodes::all::OP_DUP,
                             StackOp::_2Dup => bitcoin::opcodes::all::OP_2DUP,

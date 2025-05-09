@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bitcoin::script::PushBytesBuf;
 use chumsky::input::ValueInput;
 use chumsky::prelude::{
-    IterParser, Rich, SimpleSpan, any, end, just, one_of, skip_then_retry_until,
+    IterParser, Rich, SimpleSpan, any, end, just, one_of, recursive, skip_then_retry_until,
 };
 use chumsky::{Parser, extra, select, text};
 use hex_conservative::{DisplayHex, FromHex};
@@ -170,7 +170,7 @@ impl fmt::Display for Expression<'_> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Call<'src> {
     name: OpcodeName,
-    args_target: Arc<[VariableName<'src>]>,
+    args: Arc<[VariableName<'src>]>,
 }
 
 impl Call<'_> {
@@ -180,17 +180,17 @@ impl Call<'_> {
     }
 
     /// Gets the arguments of the function call.
-    pub fn args_target(&self) -> &[VariableName] {
-        &self.args_target
+    pub fn args(&self) -> &[VariableName] {
+        &self.args
     }
 }
 
 impl fmt::Display for Call<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}(", self.name)?;
-        for (index, arg) in self.args_target().iter().rev().enumerate() {
+        for (index, arg) in self.args().iter().enumerate() {
             write!(f, "{arg}")?;
-            if index < self.args_target().len() - 1 {
+            if index < self.args().len() - 1 {
                 write!(f, ", ")?;
             }
         }
@@ -264,17 +264,17 @@ where
         .then_ignore(just(Token::Ctrl('=')))
         .then(expr.clone())
         .then_ignore(just(Token::Ctrl(';')))
-        .map(|(var, (expr, _span))| {
+        .map(|(variable, expression)| {
             Statement::Assignment(Assignment {
-                variable: var,
-                expression: expr,
+                variable,
+                expression,
             })
         });
 
     // Expression statement: expr;
     let expr_stmt = expr
         .then_ignore(just(Token::Ctrl(';')))
-        .map(|(expr, _span)| Statement::UnitExpr(expr));
+        .map(Statement::UnitExpr);
 
     // Statement can be either an assignment or an expression statement
     let stmt = assignment.or(expr_stmt);
@@ -288,52 +288,47 @@ where
 }
 
 fn expr_parser<'src, I>()
--> impl Parser<'src, I, Spanned<Expression<'src>>, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
+-> impl Parser<'src, I, Expression<'src>, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
-    let var = select! { Token::Identifier(name) => Expression::Variable(name) }
-        .map_with(|expr, e| (expr, e.span()));
+    recursive(|expr| {
+        let variable = select! { Token::Identifier(name) => name };
+        let variable_expr = variable.map(Expression::Variable);
 
-    let hex = select! { Token::Hex(s) => s }
-        .map(|s| {
+        let bytes_expr = select! { Token::Hex(s) => s }.map(|s| {
             debug_assert_eq!(s.len() % 2, 0, "there should be pairs of hex characters");
             let vec = Vec::<u8>::from_hex(s).expect("string should be hex");
             // TODO: Handle failure case when hex is too long
             let push_bytes =
                 bitcoin::script::PushBytesBuf::try_from(vec).expect("hex should not be too long");
             Expression::Bytes(push_bytes)
-        })
-        .map_with(|expr, e| (expr, e.span()));
+        });
 
-    let call = call_parser();
+        let expr_with_parentheses = expr
+            .clone()
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')));
 
-    var.or(hex).or(call)
-}
+        // Expressions at base of parse tree, which don't contain other expressions.
+        let base_expr = variable_expr.or(bytes_expr).or(expr_with_parentheses);
 
-fn call_parser<'src, I>()
--> impl Parser<'src, I, Spanned<Expression<'src>>, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
-where
-    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
-{
-    let function_name = select! {
-        Token::Opcode("add") => OpcodeName::Add,
-        Token::Opcode("equal_verify") => OpcodeName::EqualVerify,
-    };
+        let function_name = select! {
+            Token::Opcode("add") => OpcodeName::Add,
+            Token::Opcode("equal_verify") => OpcodeName::EqualVerify,
+        };
 
-    let function_args = select! { Token::Identifier(name) => name }
-        .separated_by(just(Token::Ctrl(',')))
-        .collect::<Vec<VariableName<'src>>>();
+        let variable_sequence = variable
+            .separated_by(just(Token::Ctrl(',')))
+            .collect::<Vec<VariableName>>();
 
-    function_name
-        .then_ignore(just(Token::Ctrl('(')))
-        .then(function_args)
-        .then_ignore(just(Token::Ctrl(')')))
-        .map(|(name, args)| {
-            Expression::Call(Call {
+        let call = function_name
+            .then(variable_sequence.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))))
+            .map(|(name, args)| Call {
                 name,
-                args_target: args.into_iter().rev().collect(),
+                args: Arc::from(args),
             })
-        })
-        .map_with(|expr, e| (expr, e.span()))
+            .map(Expression::Call);
+
+        base_expr.or(call)
+    })
 }
