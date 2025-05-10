@@ -128,6 +128,7 @@ pub enum Statement<'src> {
 
 #[allow(clippy::needless_lifetimes)]
 impl<'src> Statement<'src> {
+    // FIXME: Span of statement should include tailing `;`
     /// Accesses the span of the statement.
     pub fn span(&self) -> SimpleSpan {
         match self {

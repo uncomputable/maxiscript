@@ -21,6 +21,8 @@ fn main() {
         program
     });
 
+    let mut ir_errors = Vec::new();
+
     if let Some(parse_program) = parse_program {
         info!("Compiling Bitfony program:\n{parse_program}");
         match analyze(&parse_program) {
@@ -29,8 +31,8 @@ fn main() {
                 info!("Resulting Bitcoin script:\n{bitcoin_script:?}");
                 println!("{}", bitcoin_script.as_bytes().to_lower_hex_string());
             }
-            Err(ir_error) => {
-                errors.push(ir_error);
+            Err(error) => {
+                ir_errors.push(error);
             }
         }
     }
@@ -47,6 +49,19 @@ fn main() {
                 Label::new((filename.clone(), span.into_range()))
                     .with_message(format!("while parsing this {}", label))
                     .with_color(Color::Yellow)
+            }))
+            .finish()
+            .print(sources([(filename.clone(), src.clone())]))
+            .expect("write to stdout should not fail")
+    });
+
+    ir_errors.into_iter().for_each(|e| {
+        Report::build(ReportKind::Error, filename.clone(), e.top().span().start)
+            .with_message(e.top().message())
+            .with_labels(e.contexts().iter().map(|ctx| {
+                Label::new((filename.clone(), ctx.span().into_range()))
+                    .with_message(ctx.message())
+                    .with_color(Color::Red)
             }))
             .finish()
             .print(sources([(filename.clone(), src.clone())]))

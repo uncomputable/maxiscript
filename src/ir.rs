@@ -4,7 +4,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use bitcoin::opcodes;
-use chumsky::prelude::Rich;
 use chumsky::span::SimpleSpan;
 
 use crate::parse;
@@ -210,6 +209,59 @@ impl ShallowClone for Call<'_> {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Error {
+    top: Context,
+    contexts: Vec<Context>,
+}
+
+impl Error {
+    pub fn new<Str: ToString>(message: Str, span: SimpleSpan) -> Self {
+        Self {
+            top: Context {
+                message: message.to_string(),
+                span,
+            },
+            contexts: Vec::new(),
+        }
+    }
+
+    pub fn in_context<Str: ToString>(mut self, message: Str, span: SimpleSpan) -> Self {
+        self.contexts.push(Context {
+            message: message.to_string(),
+            span,
+        });
+        Self {
+            top: self.top,
+            contexts: self.contexts,
+        }
+    }
+
+    pub fn top(&self) -> &Context {
+        &self.top
+    }
+
+    pub fn contexts(&self) -> &[Context] {
+        &self.contexts
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Context {
+    message: String,
+    span: SimpleSpan,
+}
+
+impl Context {
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn span(&self) -> SimpleSpan {
+        self.span
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct State<'src> {
     /// Maps variables to the span where they were first defined.
@@ -255,7 +307,7 @@ impl<'src> State<'src> {
 }
 
 impl<'src> Program<'src> {
-    pub fn analyze(from: &parse::Program<'src>) -> Result<Self, Rich<'src, String>> {
+    pub fn analyze(from: &parse::Program<'src>) -> Result<Self, Error> {
         let mut state = State::default();
         let statements: Arc<[Statement]> = from
             .statements()
@@ -267,10 +319,7 @@ impl<'src> Program<'src> {
 }
 
 impl<'src> Statement<'src> {
-    fn analyze(
-        from: &parse::Statement<'src>,
-        state: &mut State<'src>,
-    ) -> Result<Self, Rich<'src, String>> {
+    fn analyze(from: &parse::Statement<'src>, state: &mut State<'src>) -> Result<Self, Error> {
         match from {
             parse::Statement::Assignment(ass) => {
                 Assignment::analyze(ass, state).map(Self::Assignment)
@@ -278,10 +327,11 @@ impl<'src> Statement<'src> {
             parse::Statement::UnitExpr(parse_expr) => {
                 let expr = Expression::analyze(parse_expr, state)?;
                 if expr.n_rets != 0 {
-                    return Err(Rich::custom(
+                    debug_assert_eq!(expr.n_rets, 1);
+                    return Err(Error::new(
+                        "expected expression that returns 0 values, but got expression that returns 1 value".to_string(),
                         parse_expr.span(),
-                        "expected unit expression".to_string(),
-                    ));
+                    ).in_context("outside a let statement, the expression is not allowed to return output", from.span()));
                 }
                 Ok(Self::UnitExpr(expr))
             }
@@ -290,16 +340,21 @@ impl<'src> Statement<'src> {
 }
 
 impl<'src> Assignment<'src> {
-    fn analyze(
-        from: &parse::Assignment<'src>,
-        state: &mut State<'src>,
-    ) -> Result<Self, Rich<'src, String>> {
-        if let Err(_previous_span) = state.define_variable(from.name(), from.span_name()) {
-            return Err(Rich::custom(
+    fn analyze(from: &parse::Assignment<'src>, state: &mut State<'src>) -> Result<Self, Error> {
+        if let Err(previous_span) = state.define_variable(from.name(), from.span_name()) {
+            let error = Error::new(
+                format!("variable `{}` cannot be defined twice", from.name()),
                 from.span_name(),
-                "variable has already been defined".to_string(),
-            ));
-            // TODO Add extra error context that points to first definition of variable
+            )
+            .in_context(
+                format!("first definition of `{}`", from.name()),
+                previous_span,
+            )
+            .in_context(
+                format!("cannot define `{}` twice", from.name()),
+                from.span_name(),
+            );
+            return Err(error);
         }
 
         // Inline variable alias
@@ -313,13 +368,11 @@ impl<'src> Assignment<'src> {
 
         let expr = Expression::analyze(from.expression(), state)?;
         if expr.n_rets != 1 {
-            return Err(Rich::custom(
+            debug_assert_eq!(expr.n_rets, 0);
+            return Err(Error::new(
+                "expected expression that returns 1 value, but got expression that returns 0 values",
                 from.expression().span(),
-                format!(
-                    "expected exactly 1 return value, but got {} return values",
-                    expr.n_rets
-                ),
-            ));
+            ).in_context(format!("the let statement binds `{}` to the output of the expression", from.name()), from.expression().span()));
         }
         Ok(Self {
             assignee: from.name(),
@@ -329,10 +382,7 @@ impl<'src> Assignment<'src> {
 }
 
 impl<'src> Expression<'src> {
-    fn analyze(
-        from: &parse::Expression<'src>,
-        state: &mut State<'src>,
-    ) -> Result<Self, Rich<'src, String>> {
+    fn analyze(from: &parse::Expression<'src>, state: &mut State<'src>) -> Result<Self, Error> {
         match from.inner() {
             parse::ExpressionInner::Variable(name) => Ok(Self {
                 inner: ExpressionInner::Variable(state.resolve_alias(name)),
@@ -351,12 +401,13 @@ impl<'src> Expression<'src> {
 }
 
 impl<'src> Call<'src> {
-    fn analyze(
-        from: &parse::Call<'src>,
-        state: &mut State<'src>,
-    ) -> Result<Self, Rich<'src, String>> {
-        let name = Builtin::from_str(from.name())
-            .map_err(|_| Rich::custom(from.span_name(), "unexpected opcode".to_string()))?;
+    fn analyze(from: &parse::Call<'src>, state: &mut State<'src>) -> Result<Self, Error> {
+        let name = Builtin::from_str(from.name()).map_err(|_| {
+            Error::new("unexpected opcode", from.span_name()).in_context(
+                format!("`{}` is not in the list of known opcodes", from.name()),
+                from.span_name(),
+            )
+        })?;
         Ok(Self {
             name,
             args: from

@@ -35,9 +35,7 @@ pub fn parse_program<'src>(
     (program, parse_errors)
 }
 
-pub fn analyze<'src>(
-    program: &parse::Program<'src>,
-) -> Result<ir::Program<'src>, Rich<'src, String>> {
+pub fn analyze<'src>(program: &parse::Program<'src>) -> Result<ir::Program<'src>, ir::Error> {
     ir::Program::analyze(program)
 }
 
