@@ -290,7 +290,7 @@ where
 {
     recursive(|expr| {
         let variable = select! { Token::Identifier(name) => name }.labelled("variable name");
-        let variable_expr = variable.map(Expression::Variable).labelled("variable");
+        let variable_expr = variable.map(Expression::Variable);
 
         let bytes_expr = select! { Token::Hex(s) => s }
             .map(|s| match Vec::<u8>::from_hex(s) {
@@ -301,8 +301,7 @@ where
 
         let expr_with_parentheses = expr
             .clone()
-            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-            .labelled("parentheses");
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')));
 
         // Expressions at base of parse tree, which don't contain other expressions.
         let base_expr = variable_expr.or(bytes_expr).or(expr_with_parentheses);

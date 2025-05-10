@@ -24,7 +24,7 @@ fn main() {
         info!("Compiling Bitfony program:\n{program}");
         match analyze(&program) {
             Ok(program) => {
-                let script = compile(program).expect("should compile");
+                let script = compile(program);
                 info!("Resulting Bitcoin script:\n{script:?}");
                 println!("{}", script.as_bytes().to_lower_hex_string());
             }

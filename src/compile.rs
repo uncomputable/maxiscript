@@ -32,12 +32,9 @@ impl AsRef<PushBytes> for Position {
 }
 
 impl<'src> Stack<'src> {
-    pub fn push_variable(&mut self, name: VariableName<'src>) -> Result<(), String> {
-        if self.variables.contains(&name) {
-            return Err(format!("Variable {name} is defined twice"));
-        }
+    pub fn push_variable(&mut self, name: VariableName<'src>) {
+        debug_assert!(!self.variables.contains(&name));
         self.variables.push(name);
-        Ok(())
     }
 
     pub fn remove_moved_variables(&mut self, to_copy: &[VariableName]) {
@@ -48,7 +45,7 @@ impl<'src> Stack<'src> {
         &self.variables
     }
 
-    pub fn position(&self, name: &VariableName<'src>, pushed_args: usize) -> Option<Position> {
+    pub fn position(&self, name: &VariableName<'src>, pushed_args: usize) -> Position {
         debug_assert!(
             size_of::<u32>() <= size_of::<usize>(),
             "32-bit machine or higher"
@@ -57,17 +54,18 @@ impl<'src> Stack<'src> {
             .variables
             .iter()
             .rev()
-            .position(|x| x == name)?
+            .position(|x| x == name)
+            .expect("variable should be defined")
             .saturating_add(pushed_args);
         let [b0, b1, b2, b3, ..] = pos.to_le_bytes();
         if pos <= u8::MAX as usize {
-            Some(Position::U8([b0]))
+            Position::U8([b0])
         } else if pos <= u16::MAX as usize {
-            Some(Position::U16([b0, b1]))
+            Position::U16([b0, b1])
         } else if pos <= u32::MAX as usize {
-            Some(Position::U32([b0, b1, b2, b3]))
+            Position::U32([b0, b1, b2, b3])
         } else {
-            panic!("Stack size exceeded u32::MAX");
+            unreachable!("Stack size exceeded u32::MAX");
         }
     }
 }
@@ -124,7 +122,7 @@ fn get_statement_dependencies<'src, 'a: 'src>(
     }
 }
 
-pub fn compile(program: Program) -> Result<bitcoin::ScriptBuf, String> {
+pub fn compile(program: Program) -> bitcoin::ScriptBuf {
     let dependencies = get_statement_dependencies(&program);
 
     let mut best_script = bitcoin::ScriptBuf::new();
@@ -147,12 +145,12 @@ pub fn compile(program: Program) -> Result<bitcoin::ScriptBuf, String> {
             match statement {
                 Statement::Assignment(ass) => {
                     if let Some(expr) = ass.expression() {
-                        compile_expr(expr, &mut script, &mut stack, &to_copy)?;
-                        stack.push_variable(ass.assignee())?;
+                        compile_expr(expr, &mut script, &mut stack, &to_copy);
+                        stack.push_variable(ass.assignee());
                     }
                 }
                 Statement::UnitExpr(expr) => {
-                    compile_expr(expr, &mut script, &mut stack, &to_copy)?;
+                    compile_expr(expr, &mut script, &mut stack, &to_copy);
                 }
             }
         }
@@ -167,7 +165,7 @@ pub fn compile(program: Program) -> Result<bitcoin::ScriptBuf, String> {
         }
     }
 
-    Ok(best_script)
+    best_script
 }
 
 fn compile_expr(
@@ -175,7 +173,7 @@ fn compile_expr(
     script: &mut bitcoin::ScriptBuf,
     stack: &mut Stack,
     to_copy: &[VariableName],
-) -> Result<(), String> {
+) {
     match expr.inner() {
         ExpressionInner::Variable(..) => {
             unreachable!("variable alias should be inlined")
@@ -203,11 +201,7 @@ fn compile_expr(
                             StackOp::_2Over => opcodes::all::OP_2OVER,
                             StackOp::Tuck => opcodes::all::OP_TUCK,
                             StackOp::Pick(name) => {
-                                script.push_slice(
-                                    stack
-                                        .position(name, pushed_args)
-                                        .expect("variable should be defined"),
-                                );
+                                script.push_slice(stack.position(name, pushed_args));
                                 opcodes::all::OP_PICK
                             }
                             StackOp::Swap => opcodes::all::OP_SWAP,
@@ -216,11 +210,7 @@ fn compile_expr(
                             StackOp::_2Rot => opcodes::all::OP_2ROT,
                             StackOp::Roll(name) => {
                                 // TODO: What if OP_ROLL uses variables inside target?
-                                script.push_slice(
-                                    stack
-                                        .position(name, pushed_args)
-                                        .expect("variable should be defined"),
-                                );
+                                script.push_slice(stack.position(name, pushed_args));
                                 opcodes::all::OP_ROLL
                             }
                         };
@@ -247,5 +237,4 @@ fn compile_expr(
     }
 
     stack.remove_moved_variables(to_copy);
-    Ok(())
 }
