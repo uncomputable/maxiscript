@@ -1,7 +1,7 @@
 use chumsky::Parser;
 use chumsky::prelude::{Input, Rich};
 
-use crate::parse::{Span, Spanned, Token, lexer, program_parser};
+use crate::parse::{Spanned, Token, lexer, program_parser};
 
 mod compile;
 mod ir;
@@ -12,7 +12,7 @@ mod util;
 
 pub use compile::compile;
 
-pub type ErrorSet<'src> = Vec<Rich<'src, String, Span>>;
+pub type ErrorSet<'src> = Vec<Rich<'src, String>>;
 
 pub fn lex_program(src: &str) -> (Option<Vec<Spanned<Token>>>, Vec<Rich<char>>) {
     lexer().parse(src).into_output_errors()

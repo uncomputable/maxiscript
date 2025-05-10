@@ -10,8 +10,7 @@ use hex_conservative::{DisplayHex, FromHex};
 
 use crate::util::ShallowClone;
 
-pub type Span = SimpleSpan;
-pub type Spanned<T> = (T, Span);
+pub type Spanned<T> = (T, SimpleSpan);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token<'src> {
@@ -37,10 +36,11 @@ impl fmt::Display for Token<'_> {
 }
 
 pub fn lexer<'src>()
--> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char, Span>>> {
+-> impl Parser<'src, &'src str, Vec<Spanned<Token<'src>>>, extra::Err<Rich<'src, char>>> {
     let hex = just("0x")
         .ignore_then(
-            one_of("0123456789abcdefABCDEF")
+            any()
+                .filter(char::is_ascii_hexdigit)
                 .repeated()
                 .exactly(2)
                 .repeated()
@@ -248,9 +248,9 @@ impl ShallowClone for Call<'_> {
 }
 
 pub fn program_parser<'src, I>()
--> impl Parser<'src, I, Program<'src>, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
+-> impl Parser<'src, I, Program<'src>, extra::Err<Rich<'src, Token<'src>>>> + Clone
 where
-    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = SimpleSpan>,
 {
     let expr = expr_parser();
 
@@ -284,9 +284,9 @@ where
 }
 
 fn expr_parser<'src, I>()
--> impl Parser<'src, I, Expression<'src>, extra::Err<Rich<'src, Token<'src>, Span>>> + Clone
+-> impl Parser<'src, I, Expression<'src>, extra::Err<Rich<'src, Token<'src>>>> + Clone
 where
-    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+    I: ValueInput<'src, Token = Token<'src>, Span = SimpleSpan>,
 {
     recursive(|expr| {
         let variable = select! { Token::Identifier(name) => name }.labelled("variable name");
