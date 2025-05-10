@@ -131,7 +131,7 @@ impl<'src> Statement<'src> {
     /// Accesses the span of the statement.
     pub fn span(&self) -> SimpleSpan {
         match self {
-            Self::Assignment(ass) => ass.span(),
+            Self::Assignment(ass) => ass.span_total(),
             Self::UnitExpr(expr) => expr.span(),
         }
     }
@@ -160,15 +160,16 @@ pub type VariableName<'src> = &'src str;
 /// An assignment assigns the output of an expression to a variable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Assignment<'src> {
-    variable: VariableName<'src>,
+    name: VariableName<'src>,
     expression: Expression<'src>,
-    span: SimpleSpan,
+    span_total: SimpleSpan,
+    span_name: SimpleSpan,
 }
 
 impl<'src> Assignment<'src> {
     /// Accesses the variable that is being assigned.
-    pub fn assignee(&self) -> &VariableName<'src> {
-        &self.variable
+    pub fn name(&self) -> &VariableName<'src> {
+        &self.name
     }
 
     /// Accesses the expression that produces the assignment value.
@@ -176,24 +177,30 @@ impl<'src> Assignment<'src> {
         &self.expression
     }
 
-    /// Accesses the span of the assignment.
-    pub fn span(&self) -> SimpleSpan {
-        self.span
+    /// Accesses the total span of the assignment.
+    pub fn span_total(&self) -> SimpleSpan {
+        self.span_total
+    }
+
+    /// Accesses the span of the variable that is being assigned.
+    pub fn span_name(&self) -> SimpleSpan {
+        self.span_name
     }
 }
 
 impl fmt::Display for Assignment<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "let {} = {}", self.variable, self.expression)
+        write!(f, "let {} = {}", self.name, self.expression)
     }
 }
 
 impl ShallowClone for Assignment<'_> {
     fn shallow_clone(&self) -> Self {
         Self {
-            variable: self.variable,
+            name: self.name,
             expression: self.expression.shallow_clone(),
-            span: self.span,
+            span_total: self.span_total,
+            span_name: self.span_name,
         }
     }
 }
@@ -263,7 +270,8 @@ pub type OpcodeName<'src> = &'src str;
 pub struct Call<'src> {
     name: OpcodeName<'src>,
     args: Arc<[VariableName<'src>]>,
-    span: SimpleSpan,
+    span_total: SimpleSpan,
+    span_name: SimpleSpan,
 }
 
 impl<'src> Call<'src> {
@@ -277,9 +285,14 @@ impl<'src> Call<'src> {
         &self.args
     }
 
-    /// Accesses the span of the function call.
-    pub fn span(&self) -> SimpleSpan {
-        self.span
+    /// Accesses the total span of the function call.
+    pub fn span_total(&self) -> SimpleSpan {
+        self.span_total
+    }
+
+    /// Accesses the span of the name of the called function.
+    pub fn span_name(&self) -> SimpleSpan {
+        self.span_name
     }
 }
 
@@ -301,7 +314,8 @@ impl ShallowClone for Call<'_> {
         Self {
             name: self.name,
             args: self.args.shallow_clone(),
-            span: self.span,
+            span_total: self.span_total,
+            span_name: self.span_name,
         }
     }
 }
@@ -315,15 +329,18 @@ where
 
     // Assignment: let var = expr;
     let assignment = just(Token::Let)
-        .ignore_then(select! { Token::Identifier(name) => name })
+        .ignore_then(
+            select! { Token::Identifier(name) => name }.map_with(|name, e| (name, e.span())),
+        )
         .then_ignore(just(Token::Ctrl('=')))
         .then(expr.clone())
         .then_ignore(just(Token::Ctrl(';')))
-        .map_with(|(variable, expression), e| {
+        .map_with(|((name, span_name), expression), e| {
             Statement::Assignment(Assignment {
-                variable,
+                name,
                 expression,
-                span: e.span(),
+                span_total: e.span(),
+                span_name,
             })
         });
 
@@ -380,11 +397,13 @@ where
             .collect::<Vec<VariableName>>();
 
         let call = function_name
+            .map_with(|name, e| (name, e.span()))
             .then(variable_sequence.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))))
-            .map_with(|(name, args), e| Call {
+            .map_with(|((name, span_name), args), e| Call {
                 name,
                 args: Arc::from(args),
-                span: e.span(),
+                span_total: e.span(),
+                span_name,
             })
             .map_with(|call, e| Expression {
                 inner: ExpressionInner::Call(call),

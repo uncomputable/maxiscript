@@ -284,9 +284,9 @@ impl<'src> Assignment<'src> {
         from: &parse::Assignment<'src>,
         state: &mut State<'src>,
     ) -> Result<Self, Rich<'src, String>> {
-        if !state.define_variable(from.assignee()) {
+        if !state.define_variable(from.name()) {
             return Err(Rich::custom(
-                from.span(),
+                from.span_name(),
                 "variable has already been defined".to_string(),
             ));
             // TODO Add extra error context that points to first definition of variable
@@ -294,9 +294,9 @@ impl<'src> Assignment<'src> {
 
         // Inline variable alias
         if let parse::ExpressionInner::Variable(parent) = from.expression().inner() {
-            state.define_alias(from.assignee(), parent);
+            state.define_alias(from.name(), parent);
             return Ok(Self {
-                assignee: from.assignee(),
+                assignee: from.name(),
                 expression: None,
             });
         }
@@ -312,7 +312,7 @@ impl<'src> Assignment<'src> {
             ));
         }
         Ok(Self {
-            assignee: from.assignee(),
+            assignee: from.name(),
             expression: Some(expr),
         })
     }
@@ -346,7 +346,7 @@ impl<'src> Call<'src> {
         state: &mut State<'src>,
     ) -> Result<Self, Rich<'src, String>> {
         let name = Builtin::from_str(from.name())
-            .map_err(|_| Rich::custom(from.span(), "unexpected opcode".to_string()))?;
+            .map_err(|_| Rich::custom(from.span_name(), "unexpected opcode".to_string()))?;
         Ok(Self {
             name,
             args: from
