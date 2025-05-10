@@ -1,9 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use bitcoin::opcodes;
 use chumsky::prelude::Rich;
+use chumsky::span::SimpleSpan;
 
 use crate::parse;
 use crate::parse::VariableName;
@@ -210,10 +212,10 @@ impl ShallowClone for Call<'_> {
 
 #[derive(Debug, Clone, Default)]
 struct State<'src> {
-    /// Set of defined variables.
+    /// Maps variables to the span where they were first defined.
     ///
     /// There is an error if the same variable is defined twice.
-    defined_vars: HashSet<VariableName<'src>>,
+    first_definition: HashMap<VariableName<'src>, SimpleSpan>,
     /// Maps variables to their equivalent parent variable.
     ///
     /// All equivalent variables point to the same parent.
@@ -221,12 +223,21 @@ struct State<'src> {
 }
 
 impl<'src> State<'src> {
-    /// Defines a variable that was assigned in a let statement.
+    /// Defines the variable of the given `name` at the given `span`.
     ///
-    /// Returns `true` if the variable was not already defined (good case).
-    /// Returns `false` otherwise (error case).
-    pub fn define_variable(&mut self, name: VariableName<'src>) -> bool {
-        self.defined_vars.insert(name)
+    /// Returns `Err(previous_span)` if the name has already been defined at `previous_span`.
+    pub fn define_variable(
+        &mut self,
+        name: VariableName<'src>,
+        span: SimpleSpan,
+    ) -> Result<(), SimpleSpan> {
+        match self.first_definition.entry(name) {
+            Entry::Occupied(entry) => Err(*entry.get()),
+            Entry::Vacant(entry) => {
+                entry.insert(span);
+                Ok(())
+            }
+        }
     }
 
     pub fn define_alias(&mut self, aliased: VariableName<'src>, parent: VariableName<'src>) {
@@ -243,7 +254,6 @@ impl<'src> State<'src> {
     }
 }
 
-// TODO: Return rich errors
 impl<'src> Program<'src> {
     pub fn analyze(from: &parse::Program<'src>) -> Result<Self, Rich<'src, String>> {
         let mut state = State::default();
@@ -284,7 +294,7 @@ impl<'src> Assignment<'src> {
         from: &parse::Assignment<'src>,
         state: &mut State<'src>,
     ) -> Result<Self, Rich<'src, String>> {
-        if !state.define_variable(from.name()) {
+        if let Err(_previous_span) = state.define_variable(from.name(), from.span_name()) {
             return Err(Rich::custom(
                 from.span_name(),
                 "variable has already been defined".to_string(),
