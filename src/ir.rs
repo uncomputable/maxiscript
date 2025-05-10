@@ -279,7 +279,7 @@ impl<'src> Assignment<'src> {
         }
 
         // Inline variable alias
-        if let parse::Expression::Variable(parent) = from.expression() {
+        if let parse::ExpressionInner::Variable(parent) = from.expression().inner() {
             state.define_alias(from.assignee(), parent);
             return Ok(Self {
                 assignee: from.assignee(),
@@ -303,16 +303,16 @@ impl<'src> Assignment<'src> {
 
 impl<'src> Expression<'src> {
     fn analyze(from: &parse::Expression<'src>, state: &mut State<'src>) -> Result<Self, String> {
-        match from {
-            parse::Expression::Variable(name) => Ok(Self {
+        match from.inner() {
+            parse::ExpressionInner::Variable(name) => Ok(Self {
                 inner: ExpressionInner::Variable(state.resolve_alias(name)),
                 n_rets: 1,
             }),
-            parse::Expression::Bytes(bytes) => Ok(Self {
+            parse::ExpressionInner::Bytes(bytes) => Ok(Self {
                 inner: ExpressionInner::Bytes(bytes.shallow_clone()),
                 n_rets: 1,
             }),
-            parse::Expression::Call(call) => Call::analyze(call, state).map(|call| Self {
+            parse::ExpressionInner::Call(call) => Call::analyze(call, state).map(|call| Self {
                 n_rets: call.name.n_rets(),
                 inner: ExpressionInner::Call(call),
             }),

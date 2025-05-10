@@ -81,12 +81,18 @@ pub fn lexer<'src>()
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Program<'src> {
     statements: Arc<[Statement<'src>]>,
+    span: SimpleSpan,
 }
 
 impl<'src> Program<'src> {
     /// Accesses the statements of the program.
     pub fn statements(&self) -> &Arc<[Statement<'src>]> {
         &self.statements
+    }
+
+    /// Accesses the span of the program.
+    pub fn span(&self) -> SimpleSpan {
+        self.span
     }
 }
 
@@ -105,7 +111,8 @@ impl fmt::Display for Program<'_> {
 impl ShallowClone for Program<'_> {
     fn shallow_clone(&self) -> Self {
         Self {
-            statements: Arc::clone(&self.statements),
+            statements: self.statements.shallow_clone(),
+            span: self.span,
         }
     }
 }
@@ -119,11 +126,22 @@ pub enum Statement<'src> {
     UnitExpr(Expression<'src>),
 }
 
+#[allow(clippy::needless_lifetimes)]
+impl<'src> Statement<'src> {
+    /// Accesses the span of the statement.
+    pub fn span(&self) -> SimpleSpan {
+        match self {
+            Self::Assignment(ass) => ass.span(),
+            Self::UnitExpr(expr) => expr.span(),
+        }
+    }
+}
+
 impl fmt::Display for Statement<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Statement::Assignment(ass) => write!(f, "{ass};"),
-            Statement::UnitExpr(expr) => write!(f, "{expr};"),
+            Self::Assignment(ass) => write!(f, "{ass};"),
+            Self::UnitExpr(expr) => write!(f, "{expr};"),
         }
     }
 }
@@ -144,6 +162,7 @@ pub type VariableName<'src> = &'src str;
 pub struct Assignment<'src> {
     variable: VariableName<'src>,
     expression: Expression<'src>,
+    span: SimpleSpan,
 }
 
 impl<'src> Assignment<'src> {
@@ -155,6 +174,11 @@ impl<'src> Assignment<'src> {
     /// Accesses the expression that produces the assignment value.
     pub fn expression(&self) -> &Expression<'src> {
         &self.expression
+    }
+
+    /// Accesses the span of the assignment.
+    pub fn span(&self) -> SimpleSpan {
+        self.span
     }
 }
 
@@ -169,13 +193,51 @@ impl ShallowClone for Assignment<'_> {
         Self {
             variable: self.variable,
             expression: self.expression.shallow_clone(),
+            span: self.span,
         }
     }
 }
 
 /// An expression produces an output value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Expression<'src> {
+pub struct Expression<'src> {
+    inner: ExpressionInner<'src>,
+    span: SimpleSpan,
+}
+
+impl<'src> Expression<'src> {
+    /// Accesses the inner expression.
+    pub fn inner(&self) -> &ExpressionInner<'src> {
+        &self.inner
+    }
+
+    /// Accesses the span of the expression.
+    pub fn span(&self) -> SimpleSpan {
+        self.span
+    }
+}
+
+impl fmt::Display for Expression<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.inner() {
+            ExpressionInner::Variable(name) => write!(f, "{name}"),
+            ExpressionInner::Bytes(bytes) => write!(f, "0x{}", bytes.to_lower_hex_string()),
+            ExpressionInner::Call(call) => write!(f, "{call}"),
+        }
+    }
+}
+
+impl ShallowClone for Expression<'_> {
+    fn shallow_clone(&self) -> Self {
+        Self {
+            inner: self.inner.shallow_clone(),
+            span: self.span,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ExpressionInner<'src> {
     /// Return the value of a variable.
     Variable(VariableName<'src>),
     /// Return constant bytes.
@@ -184,17 +246,7 @@ pub enum Expression<'src> {
     Call(Call<'src>),
 }
 
-impl fmt::Display for Expression<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Expression::Variable(name) => write!(f, "{name}"),
-            Expression::Bytes(bytes) => write!(f, "0x{}", bytes.to_lower_hex_string()),
-            Expression::Call(call) => write!(f, "{call}"),
-        }
-    }
-}
-
-impl ShallowClone for Expression<'_> {
+impl ShallowClone for ExpressionInner<'_> {
     fn shallow_clone(&self) -> Self {
         match self {
             Self::Variable(name) => Self::Variable(name),
@@ -211,17 +263,23 @@ pub type OpcodeName<'src> = &'src str;
 pub struct Call<'src> {
     name: OpcodeName<'src>,
     args: Arc<[VariableName<'src>]>,
+    span: SimpleSpan,
 }
 
 impl<'src> Call<'src> {
-    /// Gets the name of the called function.
+    /// Accesses the name of the called function.
     pub fn name(&self) -> &OpcodeName<'src> {
         &self.name
     }
 
-    /// Gets the arguments of the function call.
+    /// Accesses the arguments of the function call.
     pub fn args(&self) -> &Arc<[VariableName<'src>]> {
         &self.args
+    }
+
+    /// Accesses the span of the function call.
+    pub fn span(&self) -> SimpleSpan {
+        self.span
     }
 }
 
@@ -243,6 +301,7 @@ impl ShallowClone for Call<'_> {
         Self {
             name: self.name,
             args: self.args.shallow_clone(),
+            span: self.span,
         }
     }
 }
@@ -260,10 +319,11 @@ where
         .then_ignore(just(Token::Ctrl('=')))
         .then(expr.clone())
         .then_ignore(just(Token::Ctrl(';')))
-        .map(|(variable, expression)| {
+        .map_with(|(variable, expression), e| {
             Statement::Assignment(Assignment {
                 variable,
                 expression,
+                span: e.span(),
             })
         });
 
@@ -278,8 +338,9 @@ where
     // Program is a sequence of statements
     stmt.repeated()
         .collect::<Vec<Statement>>()
-        .map(|statements| Program {
+        .map_with(|statements, e| Program {
             statements: Arc::from(statements),
+            span: e.span(),
         })
 }
 
@@ -290,12 +351,18 @@ where
 {
     recursive(|expr| {
         let variable = select! { Token::Identifier(name) => name }.labelled("variable name");
-        let variable_expr = variable.map(Expression::Variable);
+        let variable_expr = variable
+            .map_with(|name, e| Expression {
+                inner: ExpressionInner::Variable(name),
+                span: e.span(),
+            })
+            .labelled("variable");
 
         let bytes_expr = select! { Token::Hex(s) => s }
-            .map(|s| match Vec::<u8>::from_hex(s) {
-                Ok(bytes) => Expression::Bytes(Arc::from(bytes)),
-                Err(_) => unreachable!("there should be pairs of hex characters"),
+            .map(|s| Vec::<u8>::from_hex(s).expect("there should be hex pairs"))
+            .map_with(|bytes, e| Expression {
+                inner: ExpressionInner::Bytes(Arc::from(bytes)),
+                span: e.span(),
             })
             .labelled("hex literal");
 
@@ -314,11 +381,15 @@ where
 
         let call = function_name
             .then(variable_sequence.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))))
-            .map(|(name, args)| Call {
+            .map_with(|(name, args), e| Call {
                 name,
                 args: Arc::from(args),
+                span: e.span(),
             })
-            .map(Expression::Call)
+            .map_with(|call, e| Expression {
+                inner: ExpressionInner::Call(call),
+                span: e.span(),
+            })
             .labelled("function call");
 
         base_expr.or(call)
