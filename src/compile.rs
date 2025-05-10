@@ -4,7 +4,7 @@ use bitcoin::opcodes;
 use bitcoin::script::PushBytes;
 use log::{Level, debug, log_enabled};
 
-use crate::ast::{Expression, ExpressionInner, Program, Statement};
+use crate::ir::{Expression, ExpressionInner, Program, Statement};
 use crate::opcodes::{self as myopcodes, StackOp};
 use crate::optimize;
 use crate::parse::VariableName;

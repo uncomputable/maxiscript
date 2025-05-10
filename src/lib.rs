@@ -3,8 +3,8 @@ use chumsky::prelude::{Input, Rich};
 
 use crate::parse::{Span, Spanned, Token, lexer, program_parser};
 
-mod ast;
 mod compile;
+mod ir;
 mod opcodes;
 mod optimize;
 mod parse;
@@ -27,8 +27,8 @@ pub fn parse_program<'src>(
         .into_output_errors()
 }
 
-pub fn analyze<'src>(program: &parse::Program<'src>) -> Result<ast::Program<'src>, String> {
-    ast::Program::analyze(program)
+pub fn analyze<'src>(program: &parse::Program<'src>) -> Result<ir::Program<'src>, String> {
+    ir::Program::analyze(program)
 }
 
 pub fn parse_program_string(src: &str) -> Option<String> {
