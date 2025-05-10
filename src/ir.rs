@@ -3,6 +3,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use bitcoin::opcodes;
+use chumsky::prelude::Rich;
 
 use crate::parse;
 use crate::parse::VariableName;
@@ -244,27 +245,33 @@ impl<'src> State<'src> {
 
 // TODO: Return rich errors
 impl<'src> Program<'src> {
-    pub fn analyze(from: &parse::Program<'src>) -> Result<Self, String> {
+    pub fn analyze(from: &parse::Program<'src>) -> Result<Self, Rich<'src, String>> {
         let mut state = State::default();
         let statements: Arc<[Statement]> = from
             .statements()
             .iter()
             .map(|stmt| Statement::analyze(stmt, &mut state))
-            .collect::<Result<_, String>>()?;
+            .collect::<Result<_, _>>()?;
         Ok(Self { statements })
     }
 }
 
 impl<'src> Statement<'src> {
-    fn analyze(from: &parse::Statement<'src>, state: &mut State<'src>) -> Result<Self, String> {
+    fn analyze(
+        from: &parse::Statement<'src>,
+        state: &mut State<'src>,
+    ) -> Result<Self, Rich<'src, String>> {
         match from {
             parse::Statement::Assignment(ass) => {
                 Assignment::analyze(ass, state).map(Self::Assignment)
             }
-            parse::Statement::UnitExpr(expr) => {
-                let expr = Expression::analyze(expr, state)?;
+            parse::Statement::UnitExpr(parse_expr) => {
+                let expr = Expression::analyze(parse_expr, state)?;
                 if expr.n_rets != 0 {
-                    return Err("expression should be unit, but it returns values".to_string());
+                    return Err(Rich::custom(
+                        parse_expr.span(),
+                        "expected unit expression".to_string(),
+                    ));
                 }
                 Ok(Self::UnitExpr(expr))
             }
@@ -273,9 +280,16 @@ impl<'src> Statement<'src> {
 }
 
 impl<'src> Assignment<'src> {
-    fn analyze(from: &parse::Assignment<'src>, state: &mut State<'src>) -> Result<Self, String> {
+    fn analyze(
+        from: &parse::Assignment<'src>,
+        state: &mut State<'src>,
+    ) -> Result<Self, Rich<'src, String>> {
         if !state.define_variable(from.assignee()) {
-            return Err("variable should be fresh, but it has already been defined".to_string());
+            return Err(Rich::custom(
+                from.span(),
+                "variable has already been defined".to_string(),
+            ));
+            // TODO Add extra error context that points to first definition of variable
         }
 
         // Inline variable alias
@@ -289,9 +303,12 @@ impl<'src> Assignment<'src> {
 
         let expr = Expression::analyze(from.expression(), state)?;
         if expr.n_rets != 1 {
-            return Err(format!(
-                "expected exactly 1 return value, but got {} return values",
-                expr.n_rets
+            return Err(Rich::custom(
+                from.expression().span(),
+                format!(
+                    "expected exactly 1 return value, but got {} return values",
+                    expr.n_rets
+                ),
             ));
         }
         Ok(Self {
@@ -302,7 +319,10 @@ impl<'src> Assignment<'src> {
 }
 
 impl<'src> Expression<'src> {
-    fn analyze(from: &parse::Expression<'src>, state: &mut State<'src>) -> Result<Self, String> {
+    fn analyze(
+        from: &parse::Expression<'src>,
+        state: &mut State<'src>,
+    ) -> Result<Self, Rich<'src, String>> {
         match from.inner() {
             parse::ExpressionInner::Variable(name) => Ok(Self {
                 inner: ExpressionInner::Variable(state.resolve_alias(name)),
@@ -321,8 +341,12 @@ impl<'src> Expression<'src> {
 }
 
 impl<'src> Call<'src> {
-    fn analyze(from: &parse::Call<'src>, state: &mut State<'src>) -> Result<Self, String> {
-        let name = Builtin::from_str(from.name()).map_err(|_| "unexpected opcode")?;
+    fn analyze(
+        from: &parse::Call<'src>,
+        state: &mut State<'src>,
+    ) -> Result<Self, Rich<'src, String>> {
+        let name = Builtin::from_str(from.name())
+            .map_err(|_| Rich::custom(from.span(), "unexpected opcode".to_string()))?;
         Ok(Self {
             name,
             args: from
