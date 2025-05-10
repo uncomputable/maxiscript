@@ -20,6 +20,7 @@ pub enum Token<'src> {
     Identifier(&'src str),
     Fn,
     Let,
+    ReturnArrow,
 }
 
 impl fmt::Display for Token<'_> {
@@ -31,6 +32,7 @@ impl fmt::Display for Token<'_> {
             Self::Identifier(x) => write!(f, "{x}"),
             Self::Fn => write!(f, "fn"),
             Self::Let => write!(f, "let"),
+            Self::ReturnArrow => write!(f, "-> _"),
         }
     }
 }
@@ -55,13 +57,18 @@ pub fn lexer<'src>()
 
     let ctrl = one_of("()[]{};,=").map(Token::Ctrl);
 
+    let return_arrow = just("->")
+        .padded()
+        .ignore_then(just("_"))
+        .map(|_| Token::ReturnArrow);
+
     let ident = text::ascii::ident().map(|ident: &str| match ident {
         "fn" => Token::Fn,
         "let" => Token::Let,
         _ => Token::Identifier(ident),
     });
 
-    let token = hex.or(opcode).or(ctrl).or(ident);
+    let token = hex.or(opcode).or(ctrl).or(return_arrow).or(ident);
 
     let comment = just("//")
         .then(any().and_is(just('\n').not()).repeated())
@@ -77,17 +84,17 @@ pub fn lexer<'src>()
         .collect()
 }
 
-/// A program is a sequence of statements.
+/// A program is a sequence of items.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Program<'src> {
-    statements: Arc<[Statement<'src>]>,
+    items: Arc<[Function<'src>]>,
     span: SimpleSpan,
 }
 
 impl<'src> Program<'src> {
-    /// Accesses the statements of the program.
-    pub fn statements(&self) -> &Arc<[Statement<'src>]> {
-        &self.statements
+    /// Accesses the items of the program.
+    pub fn items(&self) -> &[Function<'src>] {
+        &self.items
     }
 
     /// Accesses the span of the program.
@@ -98,10 +105,10 @@ impl<'src> Program<'src> {
 
 impl fmt::Display for Program<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, stmt) in self.statements().iter().enumerate() {
-            write!(f, "{stmt}")?;
-            if index < self.statements().len() - 1 {
-                writeln!(f)?;
+        for (index, item) in self.items().iter().enumerate() {
+            write!(f, "{item}")?;
+            if index < self.items().len() - 1 {
+                writeln!(f, "\n")?;
             }
         }
         Ok(())
@@ -111,8 +118,109 @@ impl fmt::Display for Program<'_> {
 impl ShallowClone for Program<'_> {
     fn shallow_clone(&self) -> Self {
         Self {
-            statements: self.statements.shallow_clone(),
+            items: self.items.shallow_clone(),
             span: self.span,
+        }
+    }
+}
+
+pub type FunctionName<'src> = &'src str;
+
+// TODO: Allow block expressions and scopes
+/// A function is an expression that can be called for an instantiation of its parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Function<'src> {
+    name: FunctionName<'src>,
+    params: Arc<[VariableName<'src>]>,
+    body: Arc<[Statement<'src>]>,
+    is_unit: bool,
+    span_total: SimpleSpan,
+    span_name: SimpleSpan,
+    span_params: Arc<[SimpleSpan]>,
+    span_return: SimpleSpan,
+    span_body: SimpleSpan,
+}
+
+impl<'src> Function<'src> {
+    /// Accesses the name of the function.
+    pub fn name(&self) -> FunctionName<'src> {
+        self.name
+    }
+
+    /// Accesses the parameters of the function.
+    pub fn params(&self) -> &Arc<[VariableName<'src>]> {
+        &self.params
+    }
+
+    /// Accesses the body of the function.
+    pub fn body(&self) -> &[Statement<'src>] {
+        &self.body
+    }
+
+    /// Returns `true` if the function returns no values.
+    pub fn is_unit(&self) -> bool {
+        self.is_unit
+    }
+
+    /// Accesses the total span of the function.
+    pub fn span_total(&self) -> SimpleSpan {
+        self.span_total
+    }
+
+    /// Accesses the span of the name of the function.
+    pub fn span_name(&self) -> SimpleSpan {
+        self.span_name
+    }
+
+    /// Accesses the spans of the parameters of the function.
+    pub fn span_params(&self) -> &[SimpleSpan] {
+        &self.span_params
+    }
+
+    /// Accesses the span of the return type of the function.
+    pub fn span_return(&self) -> SimpleSpan {
+        self.span_return
+    }
+
+    /// Accesses the span of the body of the function.
+    pub fn span_body(&self) -> SimpleSpan {
+        self.span_body
+    }
+}
+
+impl fmt::Display for Function<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fn {}(", self.name())?;
+        for (index, param) in self.params.iter().enumerate() {
+            write!(f, "{param}")?;
+            if index != self.params.len() - 1 {
+                write!(f, ", ")?;
+            }
+        }
+        write!(f, ") ")?;
+        if !self.is_unit {
+            write!(f, "-> _ ")?;
+        }
+        writeln!(f, "{{")?;
+        for statement in self.body() {
+            writeln!(f, "    {statement}")?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl ShallowClone for Function<'_> {
+    fn shallow_clone(&self) -> Self {
+        Self {
+            name: self.name,
+            params: self.params.shallow_clone(),
+            body: self.body.shallow_clone(),
+            is_unit: self.is_unit,
+            span_total: self.span_total,
+            span_name: self.span_name,
+            span_params: self.span_params.shallow_clone(),
+            span_return: self.span_return,
+            span_body: self.span_body,
         }
     }
 }
@@ -156,6 +264,7 @@ impl ShallowClone for Statement<'_> {
     }
 }
 
+/// The name of a variable.
 pub type VariableName<'src> = &'src str;
 
 /// An assignment assigns the output of an expression to a variable.
@@ -264,6 +373,7 @@ impl ShallowClone for ExpressionInner<'_> {
     }
 }
 
+/// The name of an opcode.
 pub type OpcodeName<'src> = &'src str;
 
 /// A call runs a function with given arguments.
@@ -273,6 +383,7 @@ pub struct Call<'src> {
     args: Arc<[VariableName<'src>]>,
     span_total: SimpleSpan,
     span_name: SimpleSpan,
+    span_args: Arc<[SimpleSpan]>,
 }
 
 impl<'src> Call<'src> {
@@ -294,6 +405,11 @@ impl<'src> Call<'src> {
     /// Accesses the span of the name of the called function.
     pub fn span_name(&self) -> SimpleSpan {
         self.span_name
+    }
+
+    /// Accesses the spans of the arguments of the call.
+    pub fn span_args(&self) -> &[SimpleSpan] {
+        &self.span_args
     }
 }
 
@@ -317,6 +433,7 @@ impl ShallowClone for Call<'_> {
             args: self.args.shallow_clone(),
             span_total: self.span_total,
             span_name: self.span_name,
+            span_args: self.span_args.shallow_clone(),
         }
     }
 }
@@ -326,13 +443,88 @@ pub fn program_parser<'src, I>()
 where
     I: ValueInput<'src, Token = Token<'src>, Span = SimpleSpan>,
 {
+    func_parser()
+        .repeated()
+        .collect::<Vec<Function>>()
+        .map_with(|functions, e| Program {
+            items: Arc::from(functions),
+            span: e.span(),
+        })
+}
+
+fn func_parser<'src, I>()
+-> impl Parser<'src, I, Function<'src>, extra::Err<Rich<'src, Token<'src>>>> + Clone
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = SimpleSpan>,
+{
+    let function_name = select! { Token::Identifier(name) => name }
+        .labelled("function name")
+        .map_with(|name, e| (name, e.span()));
+
+    let params = select! { Token::Identifier(name) => name }
+        .map_with(|name, e| (name, e.span()))
+        .separated_by(just(Token::Ctrl(',')))
+        .allow_trailing()
+        .collect::<Vec<(VariableName, SimpleSpan)>>()
+        .map(|spanned_params| spanned_params.into_iter().unzip::<_, _, Vec<_>, Vec<_>>())
+        .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+        .labelled("function parameters");
+
+    let is_unit = just(Token::ReturnArrow)
+        .or_not()
+        .map(|option| option.is_none())
+        .map_with(|is_unit, e| (is_unit, e.span()))
+        .labelled("return type");
+
+    // TODO: Allow final expression without trailing `;`
+    // Without this, functions always return unit
+    let body = stmt_parser()
+        .repeated()
+        .collect::<Vec<Statement>>()
+        .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+        .map_with(|body, e| (body, e.span()))
+        .labelled("function body");
+
+    just(Token::Fn)
+        .ignore_then(function_name)
+        .then(params)
+        .map(|((name, span_name), (params, span_params))| (name, span_name, params, span_params))
+        .then(is_unit)
+        .map(
+            |((name, span_name, params, span_params), (is_unit, span_return))| {
+                (name, span_name, params, span_params, is_unit, span_return)
+            },
+        )
+        .then(body)
+        .map_with(
+            |((name, span_name, params, span_params, is_unit, span_return), (body, span_body)),
+             e| Function {
+                name,
+                params: Arc::from(params),
+                body: Arc::from(body),
+                is_unit,
+                span_total: e.span(),
+                span_name,
+                span_params: Arc::from(span_params),
+                span_return,
+                span_body,
+            },
+        )
+        .labelled("function")
+}
+
+fn stmt_parser<'src, I>()
+-> impl Parser<'src, I, Statement<'src>, extra::Err<Rich<'src, Token<'src>>>> + Clone
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = SimpleSpan>,
+{
     let expr = expr_parser();
+    let variable_name = select! { Token::Identifier(name) => name }.labelled("variable name");
 
     // Assignment: let var = expr;
     let assignment = just(Token::Let)
-        .ignore_then(
-            select! { Token::Identifier(name) => name }.map_with(|name, e| (name, e.span())),
-        )
+        .ignore_then(variable_name)
+        .map_with(|name, e| (name, e.span()))
         .then_ignore(just(Token::Ctrl('=')))
         .then(expr.clone())
         .then_ignore(just(Token::Ctrl(';')))
@@ -351,15 +543,7 @@ where
         .map(Statement::UnitExpr);
 
     // Statement can be either an assignment or an expression statement
-    let stmt = assignment.or(expr_stmt);
-
-    // Program is a sequence of statements
-    stmt.repeated()
-        .collect::<Vec<Statement>>()
-        .map_with(|statements, e| Program {
-            statements: Arc::from(statements),
-            span: e.span(),
-        })
+    assignment.or(expr_stmt)
 }
 
 fn expr_parser<'src, I>()
@@ -368,8 +552,8 @@ where
     I: ValueInput<'src, Token = Token<'src>, Span = SimpleSpan>,
 {
     recursive(|expr| {
-        let variable = select! { Token::Identifier(name) => name }.labelled("variable name");
-        let variable_expr = variable
+        let variable_name = select! { Token::Identifier(name) => name }.labelled("variable name");
+        let variable_expr = variable_name
             .map_with(|name, e| Expression {
                 inner: ExpressionInner::Variable(name),
                 span: e.span(),
@@ -391,20 +575,25 @@ where
         // Expressions at base of parse tree, which don't contain other expressions.
         let base_expr = variable_expr.or(bytes_expr).or(expr_with_parentheses);
 
-        let function_name = select! { Token::Opcode(name) => name }.labelled("opcode name");
+        let function_name = select! { Token::Opcode(name) => name }.labelled("function name");
 
-        let variable_sequence = variable
+        let args = variable_name
+            .map_with(|name, e| (name, e.span()))
             .separated_by(just(Token::Ctrl(',')))
-            .collect::<Vec<VariableName>>();
+            .collect::<Vec<(VariableName, SimpleSpan)>>()
+            .map(|spanned_params| spanned_params.into_iter().unzip::<_, _, Vec<_>, Vec<_>>())
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+            .labelled("call arguments");
 
         let call = function_name
             .map_with(|name, e| (name, e.span()))
-            .then(variable_sequence.delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')'))))
-            .map_with(|((name, span_name), args), e| Call {
+            .then(args)
+            .map_with(|((name, span_name), (args, span_args)), e| Call {
                 name,
                 args: Arc::from(args),
                 span_total: e.span(),
                 span_name,
+                span_args: Arc::from(span_args),
             })
             .map_with(|call, e| Expression {
                 inner: ExpressionInner::Call(call),

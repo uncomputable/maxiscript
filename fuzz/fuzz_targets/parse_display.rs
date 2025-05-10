@@ -3,6 +3,7 @@
 use libfuzzer_sys::fuzz_target;
 use bitfony::parse_program_string;
 
+// TODO: Use arbitrary
 fuzz_target!(|src: &str| {
     let program_string_pass1 = match parse_program_string(src) {
         Some(x) => x,

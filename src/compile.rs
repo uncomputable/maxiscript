@@ -1,18 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bitcoin::opcodes;
 use bitcoin::script::PushBytes;
 use log::{Level, debug, log_enabled};
 
-use crate::ir::{Expression, ExpressionInner, Program, Statement};
+use crate::ir::{Expression, ExpressionInner, Function, Program, Statement};
 use crate::opcodes::{self as myopcodes, StackOp};
 use crate::optimize;
 use crate::parse::VariableName;
-
-#[derive(Debug, Clone, Default)]
-struct Stack<'src> {
-    variables: Vec<VariableName<'src>>,
-}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 enum Position {
@@ -29,6 +24,12 @@ impl AsRef<PushBytes> for Position {
             Position::U32(n) => n.as_ref(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct Stack<'src> {
+    variables: Vec<VariableName<'src>>,
+    // function_body: HashMap<FunctionName<'src>, bitcoin::ScriptBuf>,
 }
 
 impl<'src> Stack<'src> {
@@ -75,19 +76,20 @@ struct Dependencies<'a, 'src> {
     uses_variables: HashMap<&'a Statement<'src>, Vec<VariableName<'src>>>,
 }
 
-fn get_statement_dependencies<'src, 'a: 'src>(
-    program: &'a Program<'src>,
-) -> Dependencies<'a, 'src> {
-    let mut var_defined_in: HashMap<VariableName, &Statement> = HashMap::new();
+/// Function arguments are assumed to be already on the stack.
+/// Therefore, function parameters don't count towards inter-statement dependencies.
+fn get_statement_dependencies<'src, 'a: 'src>(function: &'a Function) -> Dependencies<'a, 'src> {
+    let params: HashSet<VariableName> = function.params().iter().copied().collect();
+    let mut defined_in: HashMap<VariableName, &Statement> = HashMap::new();
     let mut depends_on: HashMap<&Statement, Vec<&Statement>> =
-        HashMap::with_capacity(program.statements().len());
+        HashMap::with_capacity(function.body().len());
     let mut uses_variables: HashMap<&Statement, Vec<VariableName>> =
-        HashMap::with_capacity(program.statements().len());
+        HashMap::with_capacity(function.body().len());
 
-    for statement in program.statements().iter() {
+    for statement in function.body().iter() {
         let expr = match statement {
             Statement::Assignment(ass) => {
-                var_defined_in.insert(ass.assignee(), statement);
+                defined_in.insert(ass.name(), statement);
                 match ass.expression() {
                     None => continue,
                     Some(x) => x,
@@ -96,21 +98,22 @@ fn get_statement_dependencies<'src, 'a: 'src>(
             Statement::UnitExpr(expr) => expr,
         };
         match expr.inner() {
-            ExpressionInner::Variable(x) => {
-                let &stmt_x = var_defined_in.get(x).expect("var defined");
-                depends_on.insert(statement, vec![stmt_x]);
-                uses_variables.insert(statement, vec![x]);
+            ExpressionInner::Variable(name) if !params.contains(name) => {
+                let &defining_statement = defined_in.get(name).expect("variable should be defined");
+                depends_on.insert(statement, vec![defining_statement]);
+                uses_variables.insert(statement, vec![name]);
             }
             ExpressionInner::Call(call) => {
                 let stmts = call
                     .args()
                     .iter()
-                    .map(|var| *var_defined_in.get(var).expect("var defined"))
+                    .filter(|&name| !params.contains(name))
+                    .map(|name| *defined_in.get(name).expect("variable should be defined"))
                     .collect();
                 depends_on.insert(statement, stmts);
                 uses_variables.insert(statement, call.args().to_vec());
             }
-            ExpressionInner::Bytes(_) => {
+            _ => {
                 depends_on.insert(statement, vec![]);
             }
         }
@@ -122,14 +125,20 @@ fn get_statement_dependencies<'src, 'a: 'src>(
     }
 }
 
-pub fn compile(program: Program) -> bitcoin::ScriptBuf {
-    let dependencies = get_statement_dependencies(&program);
+pub fn compile(program: &Program) -> bitcoin::ScriptBuf {
+    compile_function_body(program.main_function())
+}
+
+pub fn compile_function_body(function: &Function) -> bitcoin::ScriptBuf {
+    let dependencies = get_statement_dependencies(function);
 
     let mut best_script = bitcoin::ScriptBuf::new();
     let mut best_cost = usize::MAX;
 
     for ordered_statements in optimize::all_topological_orders(&dependencies.depends_on) {
         let mut script = bitcoin::ScriptBuf::new();
+        // TODO: Integrate local stack (changing with each stmt order) with global stack (constant)
+        //       This is necessary for compiling bodies of called functions
         let mut stack = Stack::default();
 
         for i in 0..ordered_statements.len() {
@@ -146,7 +155,7 @@ pub fn compile(program: Program) -> bitcoin::ScriptBuf {
                 Statement::Assignment(ass) => {
                     if let Some(expr) = ass.expression() {
                         compile_expr(expr, &mut script, &mut stack, &to_copy);
-                        stack.push_variable(ass.assignee());
+                        stack.push_variable(ass.name());
                     }
                 }
                 Statement::UnitExpr(expr) => {
