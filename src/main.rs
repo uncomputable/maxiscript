@@ -62,6 +62,11 @@ fn main() {
                 Label::new((filename.clone(), ctx.span().into_range()))
                     .with_message(ctx.message())
                     .with_color(Color::Red)
+            }))
+            .with_labels(e.contexts2().iter().map(|ctx| {
+                Label::new((filename.clone(), ctx.span().into_range()))
+                    .with_message(ctx.message())
+                    .with_color(Color::Yellow)
             }));
         if let Some(note) = e.note() {
             report = report.with_note(note);

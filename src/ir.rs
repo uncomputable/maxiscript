@@ -253,6 +253,7 @@ impl ShallowClone for Call<'_> {
 pub struct Error {
     top: Context,
     contexts: Vec<Context>,
+    contexts2: Vec<Context>,
     note: Option<String>,
 }
 
@@ -264,6 +265,7 @@ impl Error {
                 span,
             },
             contexts: Vec::new(),
+            contexts2: Vec::new(),
             note: None,
         }
     }
@@ -276,6 +278,20 @@ impl Error {
         Self {
             top: self.top,
             contexts: self.contexts,
+            contexts2: self.contexts2,
+            note: self.note,
+        }
+    }
+
+    pub fn in_context2<Str: ToString>(mut self, message: Str, span: SimpleSpan) -> Self {
+        self.contexts2.push(Context {
+            message: message.to_string(),
+            span,
+        });
+        Self {
+            top: self.top,
+            contexts: self.contexts,
+            contexts2: self.contexts2,
             note: self.note,
         }
     }
@@ -284,6 +300,7 @@ impl Error {
         Self {
             top: self.top,
             contexts: self.contexts,
+            contexts2: self.contexts2,
             note: Some(message.to_string()),
         }
     }
@@ -294,6 +311,10 @@ impl Error {
 
     pub fn contexts(&self) -> &[Context] {
         &self.contexts
+    }
+
+    pub fn contexts2(&self) -> &[Context] {
+        &self.contexts2
     }
 
     pub fn note(&self) -> Option<&String> {
@@ -331,6 +352,14 @@ struct State<'src> {
     ///
     /// All equivalent variables point to the same parent.
     alias_resolver: HashMap<VariableName<'src>, VariableName<'src>>,
+    /// Maps variables to their direct alias in the source code.
+    ///
+    /// This is used for pretty error messages.
+    /// ```text
+    /// `x` is aliased to `y`: `let x = y;`
+    /// `y` is aliased to `z`: `let y = z;`
+    /// ```
+    alias_source: HashMap<VariableName<'src>, (VariableName<'src>, SimpleSpan)>,
 }
 
 impl<'src> State<'src> {
@@ -366,7 +395,9 @@ impl<'src> State<'src> {
     ) -> Result<(), Error> {
         debug_assert_eq!(params.len(), span_params.len());
         debug_assert!(
-            self.variable_definition.is_empty() && self.alias_resolver.is_empty(),
+            self.variable_definition.is_empty()
+                && self.alias_resolver.is_empty()
+                && self.alias_source.is_empty(),
             "did you forget to leave the previous function?"
         );
 
@@ -394,6 +425,7 @@ impl<'src> State<'src> {
     pub fn leave_function(&mut self) {
         self.variable_definition.clear();
         self.alias_resolver.clear();
+        self.alias_source.clear();
     }
 
     /// Defines the variable of the given `name` at the given `span`.
@@ -418,13 +450,19 @@ impl<'src> State<'src> {
     /// ## Panics
     ///
     /// This method panics when the same `name` is aliased twice.
-    pub fn define_variable_alias(&mut self, name: VariableName<'src>, parent: VariableName<'src>) {
+    pub fn define_variable_alias(
+        &mut self,
+        name: VariableName<'src>,
+        parent: VariableName<'src>,
+        span: SimpleSpan,
+    ) {
         debug_assert!(
-            !self.alias_resolver.contains_key(name),
+            !self.alias_resolver.contains_key(name) && !self.alias_source.contains_key(name),
             "variable should not be defined twice"
         );
         let transitive_parent = self.alias_resolver.get(parent).copied().unwrap_or(parent);
         self.alias_resolver.insert(name, transitive_parent);
+        self.alias_source.insert(name, (parent, span));
     }
 
     /// Returns the canonical form of the given variable `name`.
@@ -574,7 +612,7 @@ impl<'src> Assignment<'src> {
 
         // Inline variable alias
         if let parse::ExpressionInner::Variable(parent) = from.expression().inner() {
-            state.define_variable_alias(from.name(), parent);
+            state.define_variable_alias(from.name(), parent, from.span_total());
             return Ok(Self {
                 name: from.name(),
                 expression: None,
@@ -652,7 +690,7 @@ impl<'src> Call<'src> {
         let mut arg_definition = HashMap::new();
         for i in 0..args.len() {
             if let Some(&previous_span) = arg_definition.get(args[i]) {
-                let error = Error::new(
+                let mut error = Error::new(
                     format!("argument `{}` cannot appear twice", args[i]),
                     from.span_args()[i],
                 )
@@ -660,8 +698,17 @@ impl<'src> Call<'src> {
                 .in_context(
                     format!("duplicate appearance of `{}`", args[i]),
                     from.span_args()[i],
-                )
-                .with_note("unique arguments are a limitation of the current compiler");
+                );
+
+                let mut name = &from.args()[i];
+                while let Some((parent, span)) = state.alias_source.get(name) {
+                    error =
+                        error.in_context2(format!("`{}` is aliased to `{}`", name, parent), *span);
+                    name = parent;
+                }
+
+                error =
+                    error.with_note("unique arguments are a limitation of the current compiler");
                 return Err(error);
 
                 // error also pointing to aliased location of both
