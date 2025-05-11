@@ -4,7 +4,7 @@ use bitcoin::opcodes;
 use bitcoin::script::PushBytes;
 use log::{Level, debug, log_enabled};
 
-use crate::ir::{Expression, ExpressionInner, Function, Program, Statement};
+use crate::ir::{CallName, Expression, ExpressionInner, Function, Program, Statement};
 use crate::opcodes::{self as myopcodes, StackOp};
 use crate::optimize;
 use crate::parse::VariableName;
@@ -48,6 +48,19 @@ struct Stack<'src> {
 }
 
 impl<'src> Stack<'src> {
+    /// Creates a stack for the body of the given `function`.
+    ///
+    /// A function body uses the function parameters
+    /// and variables defined in the body itself.
+    /// Function parameters are on the top of the stack when the function is called.
+    ///
+    /// Therefore, a function body can be compiled without knowledge of the rest of the stack.
+    pub fn for_function(function: &Function<'src>) -> Self {
+        Self {
+            variables: function.params().iter().copied().collect(),
+        }
+    }
+
     /// Pushes a single item onto the stack, under the given `name`.
     pub fn push_variable(&mut self, name: VariableName<'src>) {
         debug_assert!(!self.variables.contains(&name));
@@ -154,6 +167,8 @@ pub fn compile(program: &Program) -> bitcoin::ScriptBuf {
     compile_function_body(program.main_function())
 }
 
+// TODO: Compile function bodies according in topological order
+
 pub fn compile_function_body(function: &Function) -> bitcoin::ScriptBuf {
     let dependencies = get_statement_dependencies(function);
 
@@ -162,9 +177,7 @@ pub fn compile_function_body(function: &Function) -> bitcoin::ScriptBuf {
 
     for ordered_statements in optimize::all_topological_orders(&dependencies.depends_on) {
         let mut script = bitcoin::ScriptBuf::new();
-        // TODO: Integrate local stack (changing with each stmt order) with global stack (constant)
-        //       This is necessary for compiling bodies of called functions
-        let mut stack = Stack::default();
+        let mut stack = Stack::for_function(function);
 
         for i in 0..ordered_statements.len() {
             let statement = ordered_statements[i];
@@ -194,7 +207,10 @@ pub fn compile_function_body(function: &Function) -> bitcoin::ScriptBuf {
             best_script = script;
 
             if log_enabled!(Level::Debug) {
-                debug!("Found better statement order (cost {best_cost}):\n")
+                debug!(
+                    "Function `{}`: found better statement order (cost {best_cost}):\n",
+                    function.name()
+                );
             }
         }
     }
@@ -220,6 +236,7 @@ fn compile_expr(
             script.push_slice(bounded_bytes);
         }
         ExpressionInner::Call(call) => {
+            // Script to get arguments onto the stack top
             match myopcodes::find_shortest_transformation2(stack.variables(), call.args(), to_copy)
             {
                 None => unreachable!("variables should be defined"),
@@ -266,7 +283,20 @@ fn compile_expr(
                 }
             }
 
-            script.push_opcode(call.name().to_opcode());
+            // Script that computes function body
+            match call.name() {
+                CallName::Builtin(operation) => {
+                    script.push_opcode(operation.serialize());
+                }
+                CallName::Custom(function) => {
+                    // FIXME: Recursive call
+                    let body_script = compile_function_body(function);
+                    for instruction in body_script.instructions() {
+                        debug_assert!(instruction.is_ok(), "instructions should be well-formed");
+                    }
+                    script.extend(body_script.instructions().filter_map(Result::ok));
+                }
+            }
         }
     }
 

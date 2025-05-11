@@ -376,10 +376,28 @@ impl ShallowClone for ExpressionInner<'_> {
 /// The name of an opcode.
 pub type OpcodeName<'src> = &'src str;
 
+/// The name of a called function.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum CallName<'src> {
+    /// A Bitcoin Script opcode that is a builtin function.
+    Builtin(OpcodeName<'src>),
+    /// A user-defined custom function.
+    Custom(FunctionName<'src>),
+}
+
+impl fmt::Display for CallName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Builtin(name) => write!(f, "{name}"),
+            Self::Custom(name) => write!(f, "{name}"),
+        }
+    }
+}
+
 /// A call runs a function with given arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Call<'src> {
-    name: OpcodeName<'src>,
+    name: CallName<'src>,
     args: Arc<[VariableName<'src>]>,
     span_total: SimpleSpan,
     span_name: SimpleSpan,
@@ -388,7 +406,7 @@ pub struct Call<'src> {
 
 impl<'src> Call<'src> {
     /// Accesses the name of the called function.
-    pub fn name(&self) -> &OpcodeName<'src> {
+    pub fn name(&self) -> &CallName<'src> {
         &self.name
     }
 
@@ -506,7 +524,7 @@ where
                 span_total: e.span(),
                 span_name,
                 span_params: Arc::from(span_params),
-                span_return,
+                span_return: if is_unit { span_name } else { span_return }, // prevent empty span
                 span_body,
             },
         )
@@ -576,7 +594,12 @@ where
         // Expressions at base of parse tree, which don't contain other expressions.
         let base_expr = variable_expr.or(bytes_expr).or(expr_with_parentheses);
 
-        let function_name = select! { Token::Opcode(name) => name }.labelled("function name");
+        let function_name = select! {
+            Token::Opcode(name) => CallName::Builtin(name),
+            Token::Identifier(name) => CallName::Custom(name),
+        }
+        .map_with(|name, e| (name, e.span()))
+        .labelled("function name");
 
         let args = variable_name
             .map_with(|name, e| (name, e.span()))
@@ -587,7 +610,6 @@ where
             .labelled("call arguments");
 
         let call = function_name
-            .map_with(|name, e| (name, e.span()))
             .then(args)
             .map_with(|((name, span_name), (args, span_args)), e| Call {
                 name,
@@ -602,6 +624,6 @@ where
             })
             .labelled("function call");
 
-        base_expr.or(call)
+        call.or(base_expr)
     })
 }

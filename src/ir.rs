@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -44,6 +45,8 @@ pub struct Function<'src> {
     params: Arc<[VariableName<'src>]>,
     body: Arc<[Statement<'src>]>,
     is_unit: bool,
+    span_name: SimpleSpan,
+    span_return: SimpleSpan,
 }
 
 impl<'src> Function<'src> {
@@ -66,6 +69,16 @@ impl<'src> Function<'src> {
     pub fn is_unit(&self) -> bool {
         self.is_unit
     }
+
+    /// Accesses the span of the name of the function.
+    pub fn span_name(&self) -> SimpleSpan {
+        self.span_name
+    }
+
+    /// Accesses the span of the return type of the function.
+    pub fn span_return(&self) -> SimpleSpan {
+        self.span_return
+    }
 }
 
 impl ShallowClone for Function<'_> {
@@ -75,6 +88,8 @@ impl ShallowClone for Function<'_> {
             params: self.params.shallow_clone(),
             body: self.body.shallow_clone(),
             is_unit: self.is_unit,
+            span_name: self.span_name,
+            span_return: self.span_return,
         }
     }
 }
@@ -166,23 +181,23 @@ impl ShallowClone for ExpressionInner<'_> {
     fn shallow_clone(&self) -> Self {
         match self {
             Self::Variable(name) => Self::Variable(name),
-            Self::Bytes(bytes) => Self::Bytes(Arc::clone(bytes)),
+            Self::Bytes(bytes) => Self::Bytes(bytes.shallow_clone()),
             Self::Call(call) => Self::Call(call.shallow_clone()),
         }
     }
 }
 
-/// A Bitcoin Script opcode that is a builtin function in the DSL.
+/// A Bitcoin Script operation that is a builtin function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Builtin(opcodes::Opcode);
+pub struct Operation(opcodes::Opcode);
 
-impl std::hash::Hash for Builtin {
+impl std::hash::Hash for Operation {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         state.write_u8(self.0.to_u8());
     }
 }
 
-impl FromStr for Builtin {
+impl FromStr for Operation {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -195,18 +210,7 @@ impl FromStr for Builtin {
     }
 }
 
-impl Builtin {
-    // /// Gets the number of arguments of the opcode.
-    // ///
-    // /// Arguments are popped from the stack.
-    // pub const fn n_args(self) -> usize {
-    //     match self.0 {
-    //         opcodes::all::OP_ADD => 2,
-    //         opcodes::all::OP_EQUALVERIFY => 2,
-    //         _ => 0,
-    //     }
-    // }
-
+impl Operation {
     /// Returns `true` if the operation returns no values.
     pub const fn is_unit(self) -> bool {
         match self.0 {
@@ -217,34 +221,84 @@ impl Builtin {
     }
 
     /// Returns the corresponding [`bitcoin::Opcode`].
-    pub const fn to_opcode(self) -> bitcoin::Opcode {
+    pub const fn serialize(self) -> bitcoin::Opcode {
         self.0
+    }
+}
+
+impl fmt::Display for Operation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            opcodes::all::OP_ADD => f.write_str("add"),
+            opcodes::all::OP_EQUALVERIFY => f.write_str("equal_verify"),
+            _ => f.write_str(""),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CallName<'src> {
+    Builtin(Operation),
+    Custom(Function<'src>),
+}
+
+#[allow(clippy::needless_lifetimes)]
+impl<'src> CallName<'src> {
+    /// Returns `true` if the called function returns no values.
+    pub fn is_unit(&self) -> bool {
+        match self {
+            Self::Builtin(operation) => operation.is_unit(),
+            Self::Custom(function) => function.is_unit(),
+        }
+    }
+}
+
+impl ShallowClone for CallName<'_> {
+    fn shallow_clone(&self) -> Self {
+        match self {
+            Self::Builtin(operation) => Self::Builtin(*operation),
+            Self::Custom(function) => Self::Custom(function.shallow_clone()),
+        }
+    }
+}
+
+impl fmt::Display for CallName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Builtin(operation) => write!(f, "op::{operation}"),
+            Self::Custom(function) => write!(f, "{}", function.name()),
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Call<'src> {
-    name: Builtin,
+    name: CallName<'src>,
     args: Arc<[VariableName<'src>]>,
 }
 
-impl Call<'_> {
+impl<'src> Call<'src> {
     /// Accesses the name of the called function.
-    pub fn name(&self) -> &Builtin {
+    pub fn name(&self) -> &CallName<'src> {
         &self.name
     }
 
     /// Accesses the arguments of the call.
-    pub fn args(&self) -> &[VariableName] {
+    pub fn args(&self) -> &[VariableName<'src>] {
         &self.args
+    }
+
+    /// Returns `true` if the called function returns no values.
+    pub fn is_unit(&self) -> bool {
+        self.name.is_unit()
     }
 }
 
 impl ShallowClone for Call<'_> {
     fn shallow_clone(&self) -> Self {
         Self {
-            name: self.name,
-            args: Arc::clone(&self.args),
+            name: self.name.shallow_clone(),
+            args: self.args.shallow_clone(),
         }
     }
 }
@@ -340,10 +394,10 @@ impl Context {
 
 #[derive(Debug, Clone, Default)]
 struct State<'src> {
-    /// Maps functions to the span where they were first defined.
+    /// Maps function names to their finalized IR form.
     ///
     /// There is an error if the same function is defined twice.
-    function_definition: HashMap<FunctionName<'src>, SimpleSpan>,
+    function_definition: HashMap<FunctionName<'src>, Function<'src>>,
     /// Maps variables to the span where they were first defined.
     ///
     /// There is an error if the same variable is defined twice.
@@ -363,23 +417,6 @@ struct State<'src> {
 }
 
 impl<'src> State<'src> {
-    /// Defines the function of the given `name` at the given `span`.
-    ///
-    /// Returns `Err(previous_span)` if the name has already been defined at `previous_span`.
-    pub fn define_function(
-        &mut self,
-        name: FunctionName<'src>,
-        span: SimpleSpan,
-    ) -> Result<(), SimpleSpan> {
-        match self.function_definition.entry(name) {
-            Entry::Occupied(entry) => Err(*entry.get()),
-            Entry::Vacant(entry) => {
-                entry.insert(span);
-                Ok(())
-            }
-        }
-    }
-
     /// Enters the scope of the function body, registering all function parameters.
     ///
     /// ## Panics
@@ -493,7 +530,8 @@ impl<'src> Program<'src> {
             return Err(Error::new(
                 "the `main` function is missing from the program",
                 from.span(),
-            ));
+            )
+            .with_note("every program needs to have a `main` function"));
         }
 
         Ok(Self { items })
@@ -503,14 +541,14 @@ impl<'src> Program<'src> {
 // TODO: Resolve functions that are defined after they are used
 impl<'src> Function<'src> {
     fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Result<Self, Error> {
-        if let Err(previous_span) = state.define_function(from.name(), from.span_name()) {
+        if let Some(already_defined) = state.function_definition.get(from.name()) {
             let error = Error::new(
                 format!("function `{}` is defined multiple times", from.name()),
                 from.span_name(),
             )
             .in_context(
                 format!("first definition of `{}`", from.name()),
-                previous_span,
+                already_defined.span_name,
             )
             .in_context(
                 format!("`{}` redefined here", from.name()),
@@ -563,12 +601,19 @@ impl<'src> Function<'src> {
 
         state.leave_function();
 
-        Ok(Function {
+        let function = Function {
             name: from.name(),
             params: from.params().shallow_clone(),
             body,
             is_unit: from.is_unit(),
-        })
+            span_name: from.span_name(),
+            span_return: from.span_return(),
+        };
+        debug_assert!(!state.function_definition.contains_key(from.name()));
+        state
+            .function_definition
+            .insert(from.name(), function.shallow_clone());
+        Ok(function)
     }
 }
 
@@ -581,10 +626,25 @@ impl<'src> Statement<'src> {
             parse::Statement::UnitExpr(parse_expr) => {
                 let expr = Expression::analyze(parse_expr, state)?;
                 if !expr.is_unit {
-                    return Err(Error::new(
+                    let mut error = Error::new(
                         "expected expression that nothing, but got expression that returns something".to_string(),
                         parse_expr.span(),
-                    ).in_context("outside a let statement, an expression is not allowed to return any output", from.span()));
+                    ).in_context("outside a let statement, an expression is not allowed to return any output", from.span());
+
+                    if let ExpressionInner::Call(call) = expr.inner() {
+                        error = match call.name() {
+                            CallName::Builtin(..) => error.with_note(format!(
+                                "operation `{}` is defined to return a value",
+                                call.name
+                            )),
+                            CallName::Custom(function) => error.in_context2(
+                                format!("function `{}` is defined to return a value", call.name),
+                                function.span_return,
+                            ),
+                        };
+                    }
+
+                    return Err(error);
                 }
                 Ok(Self::UnitExpr(expr))
             }
@@ -621,11 +681,25 @@ impl<'src> Assignment<'src> {
 
         let expr = Expression::analyze(from.expression(), state)?;
         if expr.is_unit {
-            let error = Error::new(
+            let mut error = Error::new(
                 "expected expression that returns something, but got expression that returns nothing",
                 from.expression().span(),
             ).in_context("this expression should return something", from.expression().span())
-                .in_context(format!("the let statement binds `{}` to the output of an expression", from.name()), from.span_name());
+                .in_context2(format!("the let statement binds `{}` to the output of an expression", from.name()), from.span_name());
+
+            if let ExpressionInner::Call(call) = expr.inner() {
+                error = match call.name() {
+                    CallName::Builtin(..) => error.with_note(format!(
+                        "operation `{}` is defined to return nothing",
+                        call.name
+                    )),
+                    CallName::Custom(function) => error.in_context2(
+                        format!("function `{}` is defined to return nothing", call.name),
+                        function.span_return,
+                    ),
+                };
+            }
+
             return Err(error);
         }
         Ok(Self {
@@ -656,7 +730,7 @@ impl<'src> Expression<'src> {
                 is_unit: false,
             }),
             parse::ExpressionInner::Call(call) => Call::analyze(call, state).map(|call| Self {
-                is_unit: call.name.is_unit(),
+                is_unit: call.is_unit(),
                 inner: ExpressionInner::Call(call),
             }),
         }
@@ -665,13 +739,32 @@ impl<'src> Expression<'src> {
 
 impl<'src> Call<'src> {
     fn analyze(from: &parse::Call<'src>, state: &mut State<'src>) -> Result<Self, Error> {
-        let name = Builtin::from_str(from.name()).map_err(|_| {
-            Error::new("unexpected opcode", from.span_name()).in_context(
-                format!("`{}` is not in the list of known opcodes", from.name()),
-                from.span_name(),
-            )
-        })?;
+        // Get the name and the return type of the called function
+        let name = match from.name() {
+            parse::CallName::Builtin(name) => match Operation::from_str(name) {
+                Ok(opcode) => CallName::Builtin(opcode),
+                Err(_) => {
+                    return Err(
+                        Error::new("unexpected operation", from.span_name()).in_context(
+                            format!("`{}` is not in the list of known operations", from.name()),
+                            from.span_name(),
+                        ),
+                    );
+                }
+            },
+            parse::CallName::Custom(name) => match state.function_definition.get(name) {
+                Some(function) => CallName::Custom(function.shallow_clone()),
+                None => {
+                    return Err(Error::new(
+                        format!("function `{}` has not been defined", name),
+                        from.span_name(),
+                    )
+                    .in_context("cannot find definition", from.span_name()));
+                }
+            },
+        };
 
+        // Check that all arguments have been defined
         debug_assert_eq!(from.args().len(), from.span_args().len());
         let args: Arc<[VariableName]> = (0..from.args().len())
             .map(|i| match state.resolve_alias(from.args()[i]) {
@@ -687,7 +780,8 @@ impl<'src> Call<'src> {
             })
             .collect::<Result<_, _>>()?;
 
-        let mut arg_definition = HashMap::new();
+        // Check that no argument appears twice (counterintuitive limitation of current compiler)
+        let mut arg_definition: HashMap<VariableName, SimpleSpan> = HashMap::new();
         for i in 0..args.len() {
             if let Some(&previous_span) = arg_definition.get(args[i]) {
                 let mut error = Error::new(
@@ -707,16 +801,13 @@ impl<'src> Call<'src> {
                     name = parent;
                 }
 
-                error =
-                    error.with_note("unique arguments are a limitation of the current compiler");
-                return Err(error);
-
-                // error also pointing to aliased location of both
+                return Err(
+                    error.with_note("unique arguments are a limitation of the current compiler")
+                );
             }
+
             arg_definition.insert(args[i], from.span_args()[i]);
         }
-
-        // TODO: Check is function has been defined, once calls to custom functions are supported
 
         Ok(Self { name, args })
     }
