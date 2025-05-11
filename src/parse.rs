@@ -519,12 +519,13 @@ where
     I: ValueInput<'src, Token = Token<'src>, Span = SimpleSpan>,
 {
     let expr = expr_parser();
-    let variable_name = select! { Token::Identifier(name) => name }.labelled("variable name");
+    let variable_name = select! { Token::Identifier(name) => name }
+        .map_with(|name, e| (name, e.span()))
+        .labelled("variable name");
 
     // Assignment: let var = expr;
     let assignment = just(Token::Let)
         .ignore_then(variable_name)
-        .map_with(|name, e| (name, e.span()))
         .then_ignore(just(Token::Ctrl('=')))
         .then(expr.clone())
         .then_ignore(just(Token::Ctrl(';')))

@@ -253,6 +253,7 @@ impl ShallowClone for Call<'_> {
 pub struct Error {
     top: Context,
     contexts: Vec<Context>,
+    note: Option<String>,
 }
 
 impl Error {
@@ -263,6 +264,7 @@ impl Error {
                 span,
             },
             contexts: Vec::new(),
+            note: None,
         }
     }
 
@@ -274,6 +276,15 @@ impl Error {
         Self {
             top: self.top,
             contexts: self.contexts,
+            note: self.note,
+        }
+    }
+
+    pub fn with_note<Str: ToString>(self, message: Str) -> Self {
+        Self {
+            top: self.top,
+            contexts: self.contexts,
+            note: Some(message.to_string()),
         }
     }
 
@@ -283,6 +294,10 @@ impl Error {
 
     pub fn contexts(&self) -> &[Context] {
         &self.contexts
+    }
+
+    pub fn note(&self) -> Option<&String> {
+        self.note.as_ref()
     }
 }
 
@@ -351,7 +366,7 @@ impl<'src> State<'src> {
     ) -> Result<(), Error> {
         debug_assert_eq!(params.len(), span_params.len());
         debug_assert!(
-            self.variable_definition.is_empty(),
+            self.variable_definition.is_empty() && self.alias_resolver.is_empty(),
             "did you forget to leave the previous function?"
         );
 
@@ -378,6 +393,7 @@ impl<'src> State<'src> {
     /// Leaves the scope of the current function body, clearing all variable definitions.
     pub fn leave_function(&mut self) {
         self.variable_definition.clear();
+        self.alias_resolver.clear();
     }
 
     /// Defines the variable of the given `name` at the given `span`.
@@ -619,7 +635,7 @@ impl<'src> Call<'src> {
         })?;
 
         debug_assert_eq!(from.args().len(), from.span_args().len());
-        let args = (0..from.args().len())
+        let args: Arc<[VariableName]> = (0..from.args().len())
             .map(|i| match state.resolve_alias(from.args()[i]) {
                 Ok(resolved) => Ok(resolved),
                 Err(_) => {
@@ -632,6 +648,26 @@ impl<'src> Call<'src> {
                 }
             })
             .collect::<Result<_, _>>()?;
+
+        let mut arg_definition = HashMap::new();
+        for i in 0..args.len() {
+            if let Some(&previous_span) = arg_definition.get(args[i]) {
+                let error = Error::new(
+                    format!("argument `{}` cannot appear twice", args[i]),
+                    from.span_args()[i],
+                )
+                .in_context(format!("first appearance of `{}`", args[i]), previous_span)
+                .in_context(
+                    format!("duplicate appearance of `{}`", args[i]),
+                    from.span_args()[i],
+                )
+                .with_note("unique arguments are a limitation of the current compiler");
+                return Err(error);
+
+                // error also pointing to aliased location of both
+            }
+            arg_definition.insert(args[i], from.span_args()[i]);
+        }
 
         // TODO: Check is function has been defined, once calls to custom functions are supported
 

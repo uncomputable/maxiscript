@@ -43,6 +43,7 @@ impl AsRef<PushBytes> for Position {
 #[derive(Debug, Clone, Default)]
 struct Stack<'src> {
     variables: Vec<VariableName<'src>>,
+    // TODO: Cache compiled function bodies
     // function_body: HashMap<FunctionName<'src>, bitcoin::ScriptBuf>,
 }
 

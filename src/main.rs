@@ -56,13 +56,17 @@ fn main() {
     });
 
     ir_errors.into_iter().for_each(|e| {
-        Report::build(ReportKind::Error, filename.clone(), e.top().span().start)
+        let mut report = Report::build(ReportKind::Error, filename.clone(), e.top().span().start)
             .with_message(e.top().message())
             .with_labels(e.contexts().iter().map(|ctx| {
                 Label::new((filename.clone(), ctx.span().into_range()))
                     .with_message(ctx.message())
                     .with_color(Color::Red)
-            }))
+            }));
+        if let Some(note) = e.note() {
+            report = report.with_note(note);
+        }
+        report
             .finish()
             .print(sources([(filename.clone(), src.clone())]))
             .expect("write to stdout should not fail")
