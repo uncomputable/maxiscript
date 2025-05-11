@@ -9,16 +9,30 @@ use crate::opcodes::{self as myopcodes, StackOp};
 use crate::optimize;
 use crate::parse::VariableName;
 
+/// Position of an item in the stack.
+///
+/// The position is counted from the stack top.
+/// The topmost item has position 0, the second topmost item has position 1, and so on.
+///
+/// Positions are optimized for size in Bitcoin script.
+/// Position 0 fits into 0 bytes,
+/// positions 1 to 255 fits into 1 byte, and so on.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 enum Position {
+    /// Position 0.
+    U0,
+    /// Positions `1..=255`.
     U8([u8; 1]),
+    /// Positions `256..=65535`.
     U16([u8; 2]),
+    /// Positions `65535..=4294967295`.
     U32([u8; 4]),
 }
 
 impl AsRef<PushBytes> for Position {
     fn as_ref(&self) -> &PushBytes {
         match self {
+            Position::U0 => [].as_ref(),
             Position::U8(n) => n.as_ref(),
             Position::U16(n) => n.as_ref(),
             Position::U32(n) => n.as_ref(),
@@ -33,19 +47,26 @@ struct Stack<'src> {
 }
 
 impl<'src> Stack<'src> {
+    /// Pushes a single item onto the stack, under the given `name`.
     pub fn push_variable(&mut self, name: VariableName<'src>) {
         debug_assert!(!self.variables.contains(&name));
         self.variables.push(name);
     }
 
+    /// Removes items that have been moved from the stack.
+    ///
+    /// The slice `to_copy` contains items that will be used later.
+    /// By retaining only items from that slice, this effectively removes moved items.
     pub fn remove_moved_variables(&mut self, to_copy: &[VariableName]) {
         self.variables.retain(|name| to_copy.contains(name));
     }
 
+    /// Accesses the current stack.
     pub fn variables(&self) -> &[VariableName<'src>] {
         &self.variables
     }
 
+    /// Returns the position of the given variable `name`  in the stack.
     pub fn position(&self, name: &VariableName<'src>, pushed_args: usize) -> Position {
         debug_assert!(
             size_of::<u32>() <= size_of::<usize>(),
@@ -59,7 +80,10 @@ impl<'src> Stack<'src> {
             .expect("variable should be defined")
             .saturating_add(pushed_args);
         let [b0, b1, b2, b3, ..] = pos.to_le_bytes();
-        if pos <= u8::MAX as usize {
+        // FIXME: Double check for i32 shenanigans in Bitcoin script!
+        if pos == 0 {
+            Position::U0
+        } else if pos <= u8::MAX as usize {
             Position::U8([b0])
         } else if pos <= u16::MAX as usize {
             Position::U16([b0, b1])
