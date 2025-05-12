@@ -133,6 +133,7 @@ pub struct Function<'src> {
     name: FunctionName<'src>,
     params: Arc<[VariableName<'src>]>,
     body: Arc<[Statement<'src>]>,
+    final_expr: Option<Arc<Expression<'src>>>,
     is_unit: bool,
     span_total: SimpleSpan,
     span_name: SimpleSpan,
@@ -152,9 +153,14 @@ impl<'src> Function<'src> {
         &self.params
     }
 
-    /// Accesses the body of the function.
+    /// Accesses the statements of the function body.
     pub fn body(&self) -> &[Statement<'src>] {
         &self.body
+    }
+
+    /// Accesses the optional final expression in the function body, which produces the return value.
+    pub fn final_expr(&self) -> Option<&Expression<'src>> {
+        self.final_expr.as_ref().map(Arc::as_ref)
     }
 
     /// Returns `true` if the function returns no values.
@@ -205,6 +211,9 @@ impl fmt::Display for Function<'_> {
         for statement in self.body() {
             writeln!(f, "    {statement}")?;
         }
+        if let Some(expr) = self.final_expr() {
+            writeln!(f, "    {expr}")?;
+        }
         write!(f, "}}")
     }
 }
@@ -215,6 +224,7 @@ impl ShallowClone for Function<'_> {
             name: self.name,
             params: self.params.shallow_clone(),
             body: self.body.shallow_clone(),
+            final_expr: self.final_expr.shallow_clone(),
             is_unit: self.is_unit,
             span_total: self.span_total,
             span_name: self.span_name,
@@ -499,6 +509,7 @@ where
     let body = stmt_parser()
         .repeated()
         .collect::<Vec<Statement>>()
+        .then(expr_parser().or_not())
         .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
         .map_with(|body, e| (body, e.span()))
         .labelled("function body");
@@ -515,11 +526,15 @@ where
         )
         .then(body)
         .map_with(
-            |((name, span_name, params, span_params, is_unit, span_return), (body, span_body)),
+            |(
+                (name, span_name, params, span_params, is_unit, span_return),
+                ((body, final_expr), span_body),
+            ),
              e| Function {
                 name,
                 params: Arc::from(params),
                 body: Arc::from(body),
+                final_expr: final_expr.map(Arc::new),
                 is_unit,
                 span_total: e.span(),
                 span_name,

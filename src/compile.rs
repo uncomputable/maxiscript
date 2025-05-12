@@ -57,7 +57,7 @@ impl<'src> Stack<'src> {
     /// Therefore, a function body can be compiled without knowledge of the rest of the stack.
     pub fn for_function(function: &Function<'src>) -> Self {
         Self {
-            variables: function.params().iter().copied().collect(),
+            variables: function.params().to_vec(),
         }
     }
 

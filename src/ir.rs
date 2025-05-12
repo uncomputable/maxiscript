@@ -44,6 +44,7 @@ pub struct Function<'src> {
     name: FunctionName<'src>,
     params: Arc<[VariableName<'src>]>,
     body: Arc<[Statement<'src>]>,
+    final_expr: Option<Arc<Expression<'src>>>,
     is_unit: bool,
     span_name: SimpleSpan,
     span_return: SimpleSpan,
@@ -60,9 +61,14 @@ impl<'src> Function<'src> {
         &self.params
     }
 
-    /// Accesses the body of the function.
+    /// Accesses the statements of the function body.
     pub fn body(&self) -> &[Statement<'src>] {
         &self.body
+    }
+
+    /// Accesses the optional final expression in the function body, which produces the return value.
+    pub fn final_expr(&self) -> Option<&Expression<'src>> {
+        self.final_expr.as_ref().map(Arc::as_ref)
     }
 
     /// Returns `true` if the function returns no values.
@@ -87,6 +93,7 @@ impl ShallowClone for Function<'_> {
             name: self.name,
             params: self.params.shallow_clone(),
             body: self.body.shallow_clone(),
+            final_expr: self.final_expr.shallow_clone(),
             is_unit: self.is_unit,
             span_name: self.span_name,
             span_return: self.span_return,
@@ -556,6 +563,15 @@ impl<'src> Function<'src> {
             );
             return Err(error);
         }
+        if !from.is_unit() && from.name() == "main" {
+            let error = Error::new("mismatched types", from.span_total())
+                .in_context(
+                    "function `main` is declared to return a value",
+                    from.span_return(),
+                )
+                .with_note("the `main` function can never return a value");
+            return Err(error);
+        }
 
         state.enter_function(from.params(), from.span_params())?;
 
@@ -564,29 +580,38 @@ impl<'src> Function<'src> {
             .iter()
             .map(|stmt| Statement::analyze(stmt, state))
             .collect::<Result<_, _>>()?;
+        let final_expr = from
+            .final_expr()
+            .map(|expr| Expression::analyze(expr, state).map(Arc::new))
+            .transpose()?;
+        let body_return_span = from
+            .final_expr()
+            .map(|expr| expr.span())
+            .unwrap_or_else(|| {
+                from.body()
+                    .last()
+                    .map(|stmt| stmt.span())
+                    .unwrap_or_else(|| from.span_body())
+            });
 
-        if from.is_unit() {
-            // TODO: Check non-unit return value once functions have a final expression
-        } else {
-            let body_return_span = from
-                .body()
-                .last()
-                .map(|stmt| stmt.span())
-                .unwrap_or_else(|| from.span_body());
+        let body_is_unit = match &final_expr {
+            Some(expr) => expr.is_unit(),
+            None => true,
+        };
 
-            if from.name() == "main" {
-                let error = Error::new("mismatched types", from.span_total())
-                    .in_context(
-                        "function `main` is declared to return a value",
-                        from.span_return(),
-                    )
-                    .in_context(
-                        "the `main` function can never return a value",
-                        from.span_name(),
-                    );
-                return Err(error);
-            }
-
+        if from.is_unit() && !body_is_unit {
+            let error = Error::new("mismatched types", from.span_total())
+                .in_context(
+                    format!("function `{}` is declared to return nothing", from.name()),
+                    from.span_return(),
+                )
+                .in_context(
+                    format!("the last line of `{}` returns a value", from.name()),
+                    body_return_span,
+                );
+            return Err(error);
+        }
+        if !from.is_unit() && body_is_unit {
             let error = Error::new("mismatched types", from.span_total())
                 .in_context(
                     format!("function `{}` is declared to return a value", from.name()),
@@ -605,6 +630,7 @@ impl<'src> Function<'src> {
             name: from.name(),
             params: from.params().shallow_clone(),
             body,
+            final_expr,
             is_unit: from.is_unit(),
             span_name: from.span_name(),
             span_return: from.span_return(),
