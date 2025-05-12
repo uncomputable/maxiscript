@@ -121,6 +121,7 @@ fn get_statement_dependencies<'src, 'a: 'src>(function: &'a Function) -> Depende
     let mut defined_in: HashMap<VariableName, &Statement> = HashMap::new();
     let mut depends_on: HashMap<&Statement, Vec<&Statement>> =
         HashMap::with_capacity(function.body().len());
+    let mut depended_on: HashSet<&Statement> = HashSet::new();
     let mut uses_variables: HashMap<&Statement, Vec<VariableName>> =
         HashMap::with_capacity(function.body().len());
 
@@ -139,15 +140,17 @@ fn get_statement_dependencies<'src, 'a: 'src>(function: &'a Function) -> Depende
             ExpressionInner::Variable(name) if !params.contains(name) => {
                 let &defining_statement = defined_in.get(name).expect("variable should be defined");
                 depends_on.insert(statement, vec![defining_statement]);
+                depended_on.insert(defining_statement);
                 uses_variables.insert(statement, vec![name]);
             }
             ExpressionInner::Call(call) => {
-                let stmts = call
+                let stmts: Vec<&Statement> = call
                     .args()
                     .iter()
                     .filter(|&name| !params.contains(name))
                     .map(|name| *defined_in.get(name).expect("variable should be defined"))
                     .collect();
+                depended_on.extend(stmts.iter().copied());
                 depends_on.insert(statement, stmts);
                 uses_variables.insert(statement, call.args().to_vec());
             }
@@ -156,6 +159,16 @@ fn get_statement_dependencies<'src, 'a: 'src>(function: &'a Function) -> Depende
             }
         }
     }
+
+    let useful_statement = |stmt: &Statement| match stmt {
+        // Assignments are useful if their defined variable is used
+        Statement::Assignment(_) => depended_on.contains(stmt),
+        // Unit expressions are always useful (e.g., for witness verification)
+        Statement::UnitExpr(_) => true,
+    };
+
+    depends_on.retain(|stmt, _| useful_statement(stmt));
+    uses_variables.retain(|stmt, _| useful_statement(stmt));
 
     Dependencies {
         depends_on,
@@ -194,6 +207,8 @@ pub fn compile_function_body(function: &Function) -> bitcoin::ScriptBuf {
                     if let Some(expr) = ass.expression() {
                         compile_expr(expr, &mut script, &mut stack, &to_copy);
                         stack.push_variable(ass.name());
+                    } else {
+                        // Inlined variable alias, which does not contribute to target code
                     }
                 }
                 Statement::UnitExpr(expr) => {
@@ -208,7 +223,7 @@ pub fn compile_function_body(function: &Function) -> bitcoin::ScriptBuf {
 
             if log_enabled!(Level::Debug) {
                 debug!(
-                    "Function `{}`: found better statement order (cost {best_cost}):\n",
+                    "Function `{}`: found better statement order (cost {best_cost})",
                     function.name()
                 );
             }
