@@ -655,7 +655,7 @@ impl<'src> Statement<'src> {
                     let mut error = Error::new(
                         "expected expression that nothing, but got expression that returns something".to_string(),
                         parse_expr.span(),
-                    ).in_context("outside a let statement, an expression is not allowed to return any output", from.span());
+                    ).in_context("outside a let statement, an expression is not allowed to return any output", parse_expr.span());
 
                     if let ExpressionInner::Call(call) = expr.inner() {
                         error = match call.name() {
