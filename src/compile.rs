@@ -306,10 +306,14 @@ fn compile_expr(
                 CallName::Custom(function) => {
                     // FIXME: Recursive call
                     let body_script = compile_function_body(function);
-                    for instruction in body_script.instructions() {
-                        debug_assert!(instruction.is_ok(), "instructions should be well-formed");
-                    }
-                    script.extend(body_script.instructions().filter_map(Result::ok));
+                    *script = bitcoin::ScriptBuf::from_bytes(
+                        script
+                            .as_bytes()
+                            .iter()
+                            .chain(body_script.as_bytes().iter())
+                            .copied()
+                            .collect(),
+                    );
                 }
             }
         }
