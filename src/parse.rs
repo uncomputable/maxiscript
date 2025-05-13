@@ -138,6 +138,7 @@ pub struct Function<'src> {
     span_total: SimpleSpan,
     span_name: SimpleSpan,
     span_params: Arc<[SimpleSpan]>,
+    span_params_total: SimpleSpan,
     span_return: SimpleSpan,
     span_body: SimpleSpan,
 }
@@ -178,9 +179,14 @@ impl<'src> Function<'src> {
         self.span_name
     }
 
-    /// Accesses the spans of the parameters of the function.
+    /// Accesses the spans of each parameter of the function.
     pub fn span_params(&self) -> &[SimpleSpan] {
         &self.span_params
+    }
+
+    /// Accesses the span over all parameters of the function.
+    pub fn span_params_total(&self) -> SimpleSpan {
+        self.span_params_total
     }
 
     /// Accesses the span of the return type of the function.
@@ -229,6 +235,7 @@ impl ShallowClone for Function<'_> {
             span_total: self.span_total,
             span_name: self.span_name,
             span_params: self.span_params.shallow_clone(),
+            span_params_total: self.span_params_total,
             span_return: self.span_return,
             span_body: self.span_body,
         }
@@ -411,6 +418,7 @@ pub struct Call<'src> {
     span_total: SimpleSpan,
     span_name: SimpleSpan,
     span_args: Arc<[SimpleSpan]>,
+    span_args_total: SimpleSpan,
 }
 
 impl<'src> Call<'src> {
@@ -434,9 +442,14 @@ impl<'src> Call<'src> {
         self.span_name
     }
 
-    /// Accesses the spans of the arguments of the call.
+    /// Accesses the spans of each argument of the call.
     pub fn span_args(&self) -> &[SimpleSpan] {
         &self.span_args
+    }
+
+    /// Accesses the span over all arguments of the call.
+    pub fn span_args_total(&self) -> SimpleSpan {
+        self.span_args_total
     }
 }
 
@@ -461,6 +474,7 @@ impl ShallowClone for Call<'_> {
             span_total: self.span_total,
             span_name: self.span_name,
             span_args: self.span_args.shallow_clone(),
+            span_args_total: self.span_args_total,
         }
     }
 }
@@ -493,7 +507,11 @@ where
         .separated_by(just(Token::Ctrl(',')))
         .allow_trailing()
         .collect::<Vec<(VariableName, SimpleSpan)>>()
-        .map(|spanned_params| spanned_params.into_iter().unzip::<_, _, Vec<_>, Vec<_>>())
+        .map_with(|spanned_params, e| {
+            let (params, span_params): (Vec<VariableName>, Vec<SimpleSpan>) =
+                spanned_params.into_iter().unzip();
+            (params, span_params, e.span())
+        })
         .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
         .labelled("function parameters");
 
@@ -516,17 +534,32 @@ where
     just(Token::Fn)
         .ignore_then(function_name)
         .then(params)
-        .map(|((name, span_name), (params, span_params))| (name, span_name, params, span_params))
+        .map(
+            |((name, span_name), (params, span_params, span_params_total))| {
+                (name, span_name, params, span_params, span_params_total)
+            },
+        )
         .then(is_unit)
         .map(
-            |((name, span_name, params, span_params), (is_unit, span_return))| {
-                (name, span_name, params, span_params, is_unit, span_return)
+            |(
+                (name, span_name, params, span_params, span_params_total),
+                (is_unit, span_return),
+            )| {
+                (
+                    name,
+                    span_name,
+                    params,
+                    span_params,
+                    span_params_total,
+                    is_unit,
+                    span_return,
+                )
             },
         )
         .then(body)
         .map_with(
             |(
-                (name, span_name, params, span_params, is_unit, span_return),
+                (name, span_name, params, span_params, span_params_total, is_unit, span_return),
                 ((body, final_expr), span_body),
             ),
              e| Function {
@@ -538,6 +571,7 @@ where
                 span_total: e.span(),
                 span_name,
                 span_params: Arc::from(span_params),
+                span_params_total,
                 span_return: if is_unit { span_name } else { span_return }, // prevent empty span
                 span_body,
             },
@@ -619,19 +653,26 @@ where
             .map_with(|name, e| (name, e.span()))
             .separated_by(just(Token::Ctrl(',')))
             .collect::<Vec<(VariableName, SimpleSpan)>>()
-            .map(|spanned_params| spanned_params.into_iter().unzip::<_, _, Vec<_>, Vec<_>>())
+            .map_with(|spanned_params, e| {
+                let (args, span_args): (Vec<VariableName>, Vec<SimpleSpan>) =
+                    spanned_params.into_iter().unzip();
+                (args, span_args, e.span())
+            })
             .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
             .labelled("call arguments");
 
         let call = function_name
             .then(args)
-            .map_with(|((name, span_name), (args, span_args)), e| Call {
-                name,
-                args: Arc::from(args),
-                span_total: e.span(),
-                span_name,
-                span_args: Arc::from(span_args),
-            })
+            .map_with(
+                |((name, span_name), (args, span_args, span_args_total)), e| Call {
+                    name,
+                    args: Arc::from(args),
+                    span_total: e.span(),
+                    span_name,
+                    span_args: Arc::from(span_args),
+                    span_args_total,
+                },
+            )
             .map_with(|call, e| Expression {
                 inner: ExpressionInner::Call(call),
                 span: e.span(),

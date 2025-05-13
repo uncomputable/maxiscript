@@ -47,6 +47,7 @@ pub struct Function<'src> {
     final_expr: Option<Arc<Expression<'src>>>,
     is_unit: bool,
     span_name: SimpleSpan,
+    span_params_total: SimpleSpan,
     span_return: SimpleSpan,
 }
 
@@ -71,6 +72,11 @@ impl<'src> Function<'src> {
         self.final_expr.as_ref().map(Arc::as_ref)
     }
 
+    /// Returns the number of arguments that this function takes as input.
+    pub fn n_args(&self) -> usize {
+        self.params.len()
+    }
+
     /// Returns `true` if the function returns no values.
     pub fn is_unit(&self) -> bool {
         self.is_unit
@@ -79,6 +85,11 @@ impl<'src> Function<'src> {
     /// Accesses the span of the name of the function.
     pub fn span_name(&self) -> SimpleSpan {
         self.span_name
+    }
+
+    /// Accesses the span over all parameters of the function.
+    pub fn span_params_total(&self) -> SimpleSpan {
+        self.span_params_total
     }
 
     /// Accesses the span of the return type of the function.
@@ -96,6 +107,7 @@ impl ShallowClone for Function<'_> {
             final_expr: self.final_expr.shallow_clone(),
             is_unit: self.is_unit,
             span_name: self.span_name,
+            span_params_total: self.span_params_total,
             span_return: self.span_return,
         }
     }
@@ -429,6 +441,14 @@ pub enum CallName<'src> {
 
 #[allow(clippy::needless_lifetimes)]
 impl<'src> CallName<'src> {
+    /// Returns the number of arguments that this function takes as input.
+    pub fn n_args(&self) -> usize {
+        match self {
+            Self::Builtin(operation) => operation.n_args(),
+            Self::Custom(function) => function.n_args(),
+        }
+    }
+
     /// Returns `true` if the called function returns no values.
     pub fn is_unit(&self) -> bool {
         match self {
@@ -811,6 +831,7 @@ impl<'src> Function<'src> {
             final_expr,
             is_unit: from.is_unit(),
             span_name: from.span_name(),
+            span_params_total: from.span_params_total(),
             span_return: from.span_return(),
         };
         debug_assert!(!state.function_definition.contains_key(from.name()));
@@ -967,6 +988,41 @@ impl<'src> Call<'src> {
                 }
             },
         };
+
+        // Check that actual number of arguments matches declared number of parameters
+        if from.args().len() != name.n_args() {
+            let mut error = Error::new(
+                format!(
+                    "this function takes {} arguments, but {} arguments were supplied",
+                    from.args().len(),
+                    name.n_args()
+                ),
+                from.span_args_total(),
+            )
+            .in_context(
+                format!("{} arguments were supplied", from.args().len()),
+                from.span_args_total(),
+            );
+            match &name {
+                CallName::Builtin(operation) => {
+                    error = error.with_note(format!(
+                        "operation `{operation}` is defined to take {} arguments",
+                        name.n_args()
+                    ));
+                }
+                CallName::Custom(function) => {
+                    error = error.in_context2(
+                        format!(
+                            "function `{}` is declared to take {} arguments",
+                            function.name(),
+                            name.n_args()
+                        ),
+                        function.span_params_total(),
+                    );
+                }
+            }
+            return Err(error);
+        }
 
         // Check that all arguments have been defined
         debug_assert_eq!(from.args().len(), from.span_args().len());
