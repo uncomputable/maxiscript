@@ -521,7 +521,6 @@ where
         .map_with(|is_unit, e| (is_unit, e.span()))
         .labelled("return type");
 
-    // TODO: Allow final expression without trailing `;`
     // Without this, functions always return unit
     let body = stmt_parser()
         .repeated()

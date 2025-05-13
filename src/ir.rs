@@ -11,9 +11,10 @@ use crate::parse;
 use crate::parse::{FunctionName, VariableName};
 use crate::util::ShallowClone;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program<'src> {
     items: Arc<[Function<'src>]>,
+    function_index: Arc<HashMap<FunctionName<'src>, Function<'src>>>,
 }
 
 impl<'src> Program<'src> {
@@ -22,11 +23,16 @@ impl<'src> Program<'src> {
         &self.items
     }
 
+    /// Gets the function of the given `name`, if it exists.
+    pub fn get_function(&self, name: &FunctionName<'src>) -> Option<&Function<'src>> {
+        self.function_index.get(name)
+    }
+
     /// Accesses the main function of the program.
     pub fn main_function(&self) -> &Function {
         self.items
             .iter()
-            .find(|function| function.name == "main")
+            .find(|function| function.name() == "main")
             .expect("main function should exist")
     }
 }
@@ -35,41 +41,33 @@ impl ShallowClone for Program<'_> {
     fn shallow_clone(&self) -> Self {
         Self {
             items: self.items.shallow_clone(),
+            function_index: self.function_index.shallow_clone(),
         }
     }
 }
 
+/// Declaration of a function.
+///
+/// This is basically a function without its body.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Function<'src> {
+pub struct Declaration<'src> {
     name: FunctionName<'src>,
     params: Arc<[VariableName<'src>]>,
-    body: Arc<[Statement<'src>]>,
-    final_expr: Option<Arc<Expression<'src>>>,
     is_unit: bool,
     span_name: SimpleSpan,
     span_params_total: SimpleSpan,
     span_return: SimpleSpan,
 }
 
-impl<'src> Function<'src> {
+impl<'src> Declaration<'src> {
     /// Accesses the name of the function.
-    pub fn name(&self) -> FunctionName<'src> {
-        self.name
+    pub fn name(&self) -> &FunctionName<'src> {
+        &self.name
     }
 
     /// Accesses the parameters of the function.
     pub fn params(&self) -> &[VariableName<'src>] {
         &self.params
-    }
-
-    /// Accesses the statements of the function body.
-    pub fn body(&self) -> &[Statement<'src>] {
-        &self.body
-    }
-
-    /// Accesses the optional final expression in the function body, which produces the return value.
-    pub fn final_expr(&self) -> Option<&Expression<'src>> {
-        self.final_expr.as_ref().map(Arc::as_ref)
     }
 
     /// Returns the number of arguments that this function takes as input.
@@ -98,17 +96,64 @@ impl<'src> Function<'src> {
     }
 }
 
-impl ShallowClone for Function<'_> {
+impl ShallowClone for Declaration<'_> {
     fn shallow_clone(&self) -> Self {
         Self {
             name: self.name,
             params: self.params.shallow_clone(),
-            body: self.body.shallow_clone(),
-            final_expr: self.final_expr.shallow_clone(),
             is_unit: self.is_unit,
             span_name: self.span_name,
             span_params_total: self.span_params_total,
             span_return: self.span_return,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Function<'src> {
+    declaration: Declaration<'src>,
+    body: Arc<[Statement<'src>]>,
+    final_expr: Option<Arc<Expression<'src>>>,
+}
+
+impl<'src> Function<'src> {
+    /// Accesses the name of the function.
+    pub fn name(&self) -> FunctionName<'src> {
+        self.declaration.name()
+    }
+
+    /// Accesses the parameters of the function.
+    pub fn params(&self) -> &[VariableName<'src>] {
+        self.declaration.params()
+    }
+
+    /// Accesses the statements of the function body.
+    pub fn body(&self) -> &[Statement<'src>] {
+        &self.body
+    }
+
+    /// Accesses the optional final expression in the function body, which produces the return value.
+    pub fn final_expr(&self) -> Option<&Expression<'src>> {
+        self.final_expr.as_ref().map(Arc::as_ref)
+    }
+
+    /// Returns the number of arguments that this function takes as input.
+    pub fn n_args(&self) -> usize {
+        self.declaration.n_args()
+    }
+
+    /// Returns `true` if the function returns no values.
+    pub fn is_unit(&self) -> bool {
+        self.declaration.is_unit
+    }
+}
+
+impl ShallowClone for Function<'_> {
+    fn shallow_clone(&self) -> Self {
+        Self {
+            declaration: self.declaration.shallow_clone(),
+            body: self.body.shallow_clone(),
+            final_expr: self.final_expr.shallow_clone(),
         }
     }
 }
@@ -436,7 +481,7 @@ impl fmt::Display for Operation {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CallName<'src> {
     Builtin(Operation),
-    Custom(Function<'src>),
+    Custom(Declaration<'src>),
 }
 
 #[allow(clippy::needless_lifetimes)]
@@ -599,10 +644,21 @@ impl Context {
 
 #[derive(Debug, Clone, Default)]
 struct State<'src> {
-    /// Maps function names to their finalized IR form.
+    /// Maps function names to their function declaration.
     ///
-    /// There is an error if the same function is defined twice.
+    /// The IR is constructed in two phases:
+    ///
+    /// 1) The declarations of all functions are collected.
+    /// 2) The body of each function is analyzed, with reference to function declarations.
+    ///
+    /// The two-phase designs allows functions to be used before they are defined.
+    function_declaration: HashMap<FunctionName<'src>, Declaration<'src>>,
+    /// Maps function names to their finalized IR form.
     function_definition: HashMap<FunctionName<'src>, Function<'src>>,
+    // /// Maps function names to their finalized IR form.
+    // ///
+    // /// There is an error if the same function is defined twice.
+    // function_definition: HashMap<FunctionName<'src>, Function<'src>>,
     /// Maps variables to the span where they were first defined.
     ///
     /// There is an error if the same variable is defined twice.
@@ -725,13 +781,13 @@ impl<'src> State<'src> {
 impl<'src> Program<'src> {
     pub fn analyze(from: &parse::Program<'src>) -> Result<Self, Error> {
         let mut state = State::default();
-        let items: Arc<[Function]> = from
-            .items()
-            .iter()
-            .map(|function| Function::analyze(function, &mut state))
-            .collect::<Result<_, _>>()?;
 
-        if items.iter().all(|function| function.name() != "main") {
+        // Step 1: Populate state with all declared functions
+        for function in from.items() {
+            Declaration::analyze(function, &mut state)?;
+        }
+
+        if !state.function_declaration.contains_key("main") {
             return Err(Error::new(
                 "the `main` function is missing from the program",
                 from.span(),
@@ -739,14 +795,23 @@ impl<'src> Program<'src> {
             .with_note("every program needs to have a `main` function"));
         }
 
-        Ok(Self { items })
+        // Step 2: Construct IR of function bodies
+        let items: Arc<[Function]> = from
+            .items()
+            .iter()
+            .map(|function| Function::analyze(function, &mut state))
+            .collect::<Result<_, _>>()?;
+
+        Ok(Self {
+            items,
+            function_index: Arc::new(state.function_definition),
+        })
     }
 }
 
-// TODO: Resolve functions that are defined after they are used
-impl<'src> Function<'src> {
-    fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Result<Self, Error> {
-        if let Some(already_defined) = state.function_definition.get(from.name()) {
+impl<'src> Declaration<'src> {
+    fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Result<(), Error> {
+        if let Some(already_defined) = state.function_declaration.get(from.name()) {
             let error = Error::new(
                 format!("function `{}` is defined multiple times", from.name()),
                 from.span_name(),
@@ -771,6 +836,22 @@ impl<'src> Function<'src> {
             return Err(error);
         }
 
+        let function = Declaration {
+            name: from.name(),
+            params: from.params().shallow_clone(),
+            is_unit: from.is_unit(),
+            span_name: from.span_name(),
+            span_params_total: from.span_params_total(),
+            span_return: from.span_return(),
+        };
+        debug_assert!(!state.function_declaration.contains_key(from.name()));
+        state.function_declaration.insert(from.name(), function);
+        Ok(())
+    }
+}
+
+impl<'src> Function<'src> {
+    fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Result<Self, Error> {
         state.enter_function(from.params(), from.span_params())?;
 
         let body: Arc<[Statement]> = from
@@ -824,17 +905,20 @@ impl<'src> Function<'src> {
 
         state.leave_function();
 
+        let declaration = state
+            .function_declaration
+            .get(from.name())
+            .expect("all function should be declared at this point")
+            .shallow_clone();
         let function = Function {
-            name: from.name(),
-            params: from.params().shallow_clone(),
+            declaration,
             body,
             final_expr,
-            is_unit: from.is_unit(),
-            span_name: from.span_name(),
-            span_params_total: from.span_params_total(),
-            span_return: from.span_return(),
         };
-        debug_assert!(!state.function_definition.contains_key(from.name()));
+        debug_assert!(
+            !state.function_definition.contains_key(from.name()),
+            "we should visit each function only once"
+        );
         state
             .function_definition
             .insert(from.name(), function.shallow_clone());
@@ -977,7 +1061,7 @@ impl<'src> Call<'src> {
                     );
                 }
             },
-            parse::CallName::Custom(name) => match state.function_definition.get(name) {
+            parse::CallName::Custom(name) => match state.function_declaration.get(name) {
                 Some(function) => CallName::Custom(function.shallow_clone()),
                 None => {
                     return Err(Error::new(

@@ -177,12 +177,12 @@ fn get_statement_dependencies<'src, 'a: 'src>(function: &'a Function) -> Depende
 }
 
 pub fn compile(program: &Program) -> bitcoin::ScriptBuf {
-    compile_function_body(program.main_function())
+    compile_function_body(program.main_function(), program)
 }
 
 // TODO: Compile function bodies according in topological order
 
-pub fn compile_function_body(function: &Function) -> bitcoin::ScriptBuf {
+pub fn compile_function_body(function: &Function, program: &Program) -> bitcoin::ScriptBuf {
     let dependencies = get_statement_dependencies(function);
 
     let mut best_script = bitcoin::ScriptBuf::new();
@@ -205,14 +205,14 @@ pub fn compile_function_body(function: &Function) -> bitcoin::ScriptBuf {
             match statement {
                 Statement::Assignment(ass) => {
                     if let Some(expr) = ass.expression() {
-                        compile_expr(expr, &mut script, &mut stack, &to_copy);
+                        compile_expr(expr, program, &mut script, &mut stack, &to_copy);
                         stack.push_variable(ass.name());
                     } else {
                         // Inlined variable alias, which does not contribute to target code
                     }
                 }
                 Statement::UnitExpr(expr) => {
-                    compile_expr(expr, &mut script, &mut stack, &to_copy);
+                    compile_expr(expr, program, &mut script, &mut stack, &to_copy);
                 }
             }
         }
@@ -235,6 +235,7 @@ pub fn compile_function_body(function: &Function) -> bitcoin::ScriptBuf {
 
 fn compile_expr(
     expr: &Expression<'_>,
+    program: &Program,
     script: &mut bitcoin::ScriptBuf,
     stack: &mut Stack,
     to_copy: &[VariableName],
@@ -305,7 +306,10 @@ fn compile_expr(
                 }
                 CallName::Custom(function) => {
                     // FIXME: Recursive call
-                    let body_script = compile_function_body(function);
+                    let body_script = compile_function_body(
+                        program.get_function(function.name()).unwrap(),
+                        program,
+                    );
                     *script = bitcoin::ScriptBuf::from_bytes(
                         script
                             .as_bytes()
