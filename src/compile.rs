@@ -6,8 +6,8 @@ use log::{Level, debug, log_enabled};
 
 use crate::ir::{CallName, Expression, ExpressionInner, Function, Program, Statement};
 use crate::opcodes::{self as myopcodes, StackOp};
-use crate::optimize;
 use crate::parse::VariableName;
+use crate::sorting;
 
 /// Position of an item in the stack.
 ///
@@ -188,7 +188,7 @@ pub fn compile_function_body(function: &Function, program: &Program) -> bitcoin:
     let mut best_script = bitcoin::ScriptBuf::new();
     let mut best_cost = usize::MAX;
 
-    for ordered_statements in optimize::all_topological_orders(&dependencies.depends_on) {
+    for ordered_statements in sorting::all_topological_orders(&dependencies.depends_on) {
         let mut script = bitcoin::ScriptBuf::new();
         let mut stack = Stack::for_function(function);
 

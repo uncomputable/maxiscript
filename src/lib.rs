@@ -6,8 +6,8 @@ use crate::parse::{Spanned, Token, lexer, program_parser};
 mod compile;
 mod ir;
 mod opcodes;
-mod optimize;
 mod parse;
+mod sorting;
 mod util;
 
 pub use compile::compile;
