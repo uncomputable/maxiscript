@@ -5,9 +5,9 @@ use bitcoin::script::PushBytes;
 use log::{Level, debug, log_enabled};
 
 use crate::ir::{CallName, Expression, ExpressionInner, Function, Program, Statement};
-use crate::opcodes::{self as myopcodes, StackOp};
 use crate::parse::VariableName;
 use crate::sorting;
+use crate::stack::{self, StackOp};
 
 /// Position of an item in the stack.
 ///
@@ -253,8 +253,7 @@ fn compile_expr(
         }
         ExpressionInner::Call(call) => {
             // Script to get arguments onto the stack top
-            match myopcodes::find_shortest_transformation2(stack.variables(), call.args(), to_copy)
-            {
+            match stack::find_shortest_transformation2(stack.variables(), call.args(), to_copy) {
                 None => unreachable!("variables should be defined"),
                 Some(transformation_script) => {
                     let mut pushed_args = 0;

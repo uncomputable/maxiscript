@@ -5,9 +5,9 @@ use crate::parse::{Spanned, Token, lexer, program_parser};
 
 mod compile;
 mod ir;
-mod opcodes;
 mod parse;
 mod sorting;
+mod stack;
 mod util;
 
 pub use compile::compile;
