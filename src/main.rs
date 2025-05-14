@@ -38,7 +38,8 @@ fn main() {
     }
 
     errors.into_iter().for_each(|e| {
-        Report::build(ReportKind::Error, filename.clone(), e.span().start)
+        Report::build(ReportKind::Error, (filename.clone(), e.span().into_range()))
+            .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
             .with_message(e.to_string())
             .with_label(
                 Label::new((filename.clone(), e.span().into_range()))
@@ -56,18 +57,22 @@ fn main() {
     });
 
     ir_errors.into_iter().for_each(|e| {
-        let mut report = Report::build(ReportKind::Error, filename.clone(), e.top().span().start)
-            .with_message(e.top().message())
-            .with_labels(e.contexts().iter().map(|ctx| {
-                Label::new((filename.clone(), ctx.span().into_range()))
-                    .with_message(ctx.message())
-                    .with_color(Color::Red)
-            }))
-            .with_labels(e.contexts2().iter().map(|ctx| {
-                Label::new((filename.clone(), ctx.span().into_range()))
-                    .with_message(ctx.message())
-                    .with_color(Color::Yellow)
-            }));
+        let mut report = Report::build(
+            ReportKind::Error,
+            (filename.clone(), e.top().span().into_range()),
+        )
+        .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
+        .with_message(e.top().message())
+        .with_labels(e.contexts().iter().map(|ctx| {
+            Label::new((filename.clone(), ctx.span().into_range()))
+                .with_message(ctx.message())
+                .with_color(Color::Red)
+        }))
+        .with_labels(e.contexts2().iter().map(|ctx| {
+            Label::new((filename.clone(), ctx.span().into_range()))
+                .with_message(ctx.message())
+                .with_color(Color::Yellow)
+        }));
         if let Some(note) = e.note() {
             report = report.with_note(note);
         }
