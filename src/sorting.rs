@@ -1,8 +1,48 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 
 use itertools::Itertools;
 use log::error;
+
+/// Takes the given `greater_than` relation and
+/// returns a vector that is topologically sorted from smallest to largest element.
+///
+/// Uses Kahn's algorithm
+/// <https://en.wikipedia.org/w/index.php?title=Topological_sorting&oldid=1275275815>,
+/// which has `O(n)` time complexity.
+pub fn topological_sort<T: Eq + Hash + Clone>(mut greater_than: HashMap<T, HashSet<T>>) -> Vec<T> {
+    let mut sorted = Vec::new();
+
+    // TODO: Further optimize
+    // FIXME: Take HashMap parameter by reference?
+    let keys: HashSet<_> = greater_than.keys().collect();
+    let mut smallest: VecDeque<_> = greater_than
+        .iter()
+        .flat_map(|(key, value)| {
+            value
+                .is_empty()
+                .then_some(key)
+                .into_iter()
+                .chain(value.iter().filter(|x| !keys.contains(x)))
+        })
+        .unique()
+        .cloned()
+        .collect();
+    greater_than.retain(|_, values| !values.is_empty());
+
+    while let Some(x) = smallest.pop_front() {
+        for (key, value) in greater_than.iter_mut() {
+            value.remove(&x);
+            if value.is_empty() {
+                smallest.push_back(key.clone());
+            }
+        }
+        greater_than.retain(|_, values| !values.is_empty());
+        sorted.push(x);
+    }
+
+    sorted
+}
 
 struct State {
     /// Path of nodes from smallest to greatest.
@@ -230,6 +270,80 @@ pub fn all_topological_orders<T: Eq + Hash>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn verify_topological_order<T: Eq + Hash + std::fmt::Debug>(
+        greater_than: &HashMap<T, HashSet<T>>,
+        sorted: &[T],
+    ) {
+        for x in greater_than.keys().chain(greater_than.values().flatten()) {
+            assert!(
+                sorted.contains(x),
+                "sorted slice should contain `{x:?}`, but it doesn't: `{sorted:?}`"
+            )
+        }
+        for (x, less_than_x) in greater_than {
+            for y in less_than_x {
+                assert!(
+                    sorted.iter().position(|y1| y1 == y).unwrap()
+                        < sorted.iter().position(|x1| x1 == x).unwrap(),
+                    "`{y:?}` should come before `{x:?}`, but it doesn't: `{sorted:?}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_topological_sort() {
+        // ε
+        let empty: HashMap<i32, HashSet<i32>> = HashMap::new();
+        assert_eq!(topological_sort(empty), vec![]);
+
+        // 1
+        let single = HashMap::from([(1, HashSet::<i32>::new())]);
+        assert_eq!(topological_sort(single), vec![1]);
+
+        // 1 > 2 > 3 > 4
+        let chain = HashMap::from([
+            (1, HashSet::from([2])),
+            (2, HashSet::from([3])),
+            (3, HashSet::from([4])),
+        ]);
+        assert_eq!(topological_sort(chain), vec![4, 3, 2, 1]);
+
+        // 1 > 2 > 4
+        // |       ^
+        // V       |
+        // 3 > ----/
+        let diamond = HashMap::from([
+            (1, HashSet::from([2, 3])),
+            (2, HashSet::from([4])),
+            (3, HashSet::from([4])),
+        ]);
+        verify_topological_order(&diamond, &topological_sort(diamond.clone()));
+
+        // 1 > 2 > 3
+        // |   |   ^
+        // v   v   |
+        // 4 > 5 > 6 > 7
+        let complex = HashMap::from([
+            (1, HashSet::from([2, 4])),
+            (2, HashSet::from([3, 5])),
+            (4, HashSet::from([5])),
+            (5, HashSet::from([6])),
+            (6, HashSet::from([3, 7])),
+        ]);
+        verify_topological_order(&complex, &topological_sort(complex.clone()));
+    }
+
+    #[test]
+    fn test_topological_sort_cyclic() {
+        let greater_than = HashMap::from([
+            (1, HashSet::from([2])),
+            (2, HashSet::from([3])),
+            (3, HashSet::from([1])),
+        ]);
+        assert!(topological_sort(greater_than).is_empty());
+    }
 
     #[test]
     fn test_topological_order() {
