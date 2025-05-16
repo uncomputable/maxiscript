@@ -5,6 +5,7 @@ use crate::parse::{Spanned, Token, lexer, program_parser};
 
 mod compile;
 mod ir;
+mod op;
 mod parse;
 mod sorting;
 mod stack;
