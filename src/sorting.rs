@@ -4,41 +4,42 @@ use std::hash::Hash;
 use itertools::Itertools;
 use log::error;
 
-/// Takes the given `greater_than` relation and
-/// returns a vector that is topologically sorted from smallest to largest element.
+/// Takes the given `less_than` relation and
+/// returns a vector that is topologically sorted from least to greatest element.
+///
+/// Each element is cloned into the sorted vector.
 ///
 /// Uses Kahn's algorithm
 /// <https://en.wikipedia.org/w/index.php?title=Topological_sorting&oldid=1275275815>,
 /// which has `O(n)` time complexity.
-pub fn topological_sort<T: Eq + Hash + Clone>(mut greater_than: HashMap<T, HashSet<T>>) -> Vec<T> {
-    let mut sorted = Vec::new();
+pub fn topological_sort<T: Eq + Hash + Clone>(less_than: &HashMap<T, HashSet<T>>) -> Vec<T> {
+    let mut sorted = Vec::with_capacity(less_than.len());
 
-    // TODO: Further optimize
-    // FIXME: Take HashMap parameter by reference?
-    let keys: HashSet<_> = greater_than.keys().collect();
-    let mut smallest: VecDeque<_> = greater_than
+    let mut in_degree: HashMap<&T, usize> = HashMap::with_capacity(less_than.len());
+    for (x, greater_than_x) in less_than.iter() {
+        in_degree.entry(x).or_insert(0);
+        for y in greater_than_x {
+            *in_degree.entry(y).or_default() += 1;
+        }
+    }
+
+    let mut least: VecDeque<&T> = in_degree
         .iter()
-        .flat_map(|(key, value)| {
-            value
-                .is_empty()
-                .then_some(key)
-                .into_iter()
-                .chain(value.iter().filter(|x| !keys.contains(x)))
-        })
-        .unique()
-        .cloned()
+        .filter_map(|(x, &in_degree_x)| (in_degree_x == 0).then_some(*x))
         .collect();
-    greater_than.retain(|_, values| !values.is_empty());
 
-    while let Some(x) = smallest.pop_front() {
-        for (key, value) in greater_than.iter_mut() {
-            value.remove(&x);
-            if value.is_empty() {
-                smallest.push_back(key.clone());
+    while let Some(x) = least.pop_front() {
+        sorted.push(x.clone());
+
+        if let Some(greater_than_x) = less_than.get(x) {
+            for y in greater_than_x {
+                let in_degree_y = in_degree.get_mut(y).unwrap();
+                *in_degree_y -= 1;
+                if *in_degree_y == 0 {
+                    least.push_back(y);
+                }
             }
         }
-        greater_than.retain(|_, values| !values.is_empty());
-        sorted.push(x);
     }
 
     sorted
@@ -272,21 +273,21 @@ mod tests {
     use super::*;
 
     fn verify_topological_order<T: Eq + Hash + std::fmt::Debug>(
-        greater_than: &HashMap<T, HashSet<T>>,
+        less_than: &HashMap<T, HashSet<T>>,
         sorted: &[T],
     ) {
-        for x in greater_than.keys().chain(greater_than.values().flatten()) {
+        for x in less_than.keys().chain(less_than.values().flatten()) {
             assert!(
-                sorted.contains(x),
+                sorted.contains(&x),
                 "sorted slice should contain `{x:?}`, but it doesn't: `{sorted:?}`"
             )
         }
-        for (x, less_than_x) in greater_than {
-            for y in less_than_x {
+        for (x, greater_than_x) in less_than {
+            for y in greater_than_x {
                 assert!(
-                    sorted.iter().position(|y1| y1 == y).unwrap()
-                        < sorted.iter().position(|x1| x1 == x).unwrap(),
-                    "`{y:?}` should come before `{x:?}`, but it doesn't: `{sorted:?}`"
+                    sorted.iter().position(|x1| x1 == x).unwrap()
+                        < sorted.iter().position(|y1| y1 == y).unwrap(),
+                    "`{x:?}` should come before `{y:?}`, but it doesn't: `{sorted:?}`"
                 );
             }
         }
@@ -296,35 +297,35 @@ mod tests {
     fn test_topological_sort() {
         // ε
         let empty: HashMap<i32, HashSet<i32>> = HashMap::new();
-        assert_eq!(topological_sort(empty), vec![]);
+        assert_eq!(topological_sort(&empty), vec![]);
 
         // 1
         let single = HashMap::from([(1, HashSet::<i32>::new())]);
-        assert_eq!(topological_sort(single), vec![1]);
+        assert_eq!(topological_sort(&single), vec![1]);
 
-        // 1 > 2 > 3 > 4
+        // 1 < 2 < 3 < 4
         let chain = HashMap::from([
             (1, HashSet::from([2])),
             (2, HashSet::from([3])),
             (3, HashSet::from([4])),
         ]);
-        assert_eq!(topological_sort(chain), vec![4, 3, 2, 1]);
+        assert_eq!(topological_sort(&chain), vec![1, 2, 3, 4]);
 
-        // 1 > 2 > 4
-        // |       ^
-        // V       |
-        // 3 > ----/
+        // 1 < 2 < 4
+        // ^       V
+        // |       |
+        // 3 < ----/
         let diamond = HashMap::from([
             (1, HashSet::from([2, 3])),
             (2, HashSet::from([4])),
             (3, HashSet::from([4])),
         ]);
-        verify_topological_order(&diamond, &topological_sort(diamond.clone()));
+        verify_topological_order(&diamond, &topological_sort(&diamond));
 
-        // 1 > 2 > 3
-        // |   |   ^
-        // v   v   |
-        // 4 > 5 > 6 > 7
+        // 1 < 2 < 3
+        // ^   ^   |
+        // |   |   V
+        // 4 < 5 < 6 < 7
         let complex = HashMap::from([
             (1, HashSet::from([2, 4])),
             (2, HashSet::from([3, 5])),
@@ -332,17 +333,17 @@ mod tests {
             (5, HashSet::from([6])),
             (6, HashSet::from([3, 7])),
         ]);
-        verify_topological_order(&complex, &topological_sort(complex.clone()));
+        verify_topological_order(&complex, &topological_sort(&complex));
     }
 
     #[test]
     fn test_topological_sort_cyclic() {
-        let greater_than = HashMap::from([
+        let less_than = HashMap::from([
             (1, HashSet::from([2])),
             (2, HashSet::from([3])),
             (3, HashSet::from([1])),
         ]);
-        assert!(topological_sort(greater_than).is_empty());
+        assert!(topological_sort(&less_than).is_empty());
     }
 
     #[test]
