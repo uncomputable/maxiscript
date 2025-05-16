@@ -19,12 +19,18 @@ pub struct Program<'src> {
 
 impl<'src> Program<'src> {
     /// Accesses the items of the program.
+    ///
+    /// ## Topological order
+    ///
+    /// If function `g` calls function `f`, then `f` appears before `g`.
+    /// The first functions that appear don't call anything.
+    /// The last function that will appear is the `main` function.
     pub fn items(&self) -> &[Function<'src>] {
         &self.items
     }
 
     /// Gets the function of the given `name`, if it exists.
-    pub fn get_function(&self, name: &FunctionName<'src>) -> Option<&Function<'src>> {
+    pub fn get_function(&self, name: FunctionName<'src>) -> Option<&Function<'src>> {
         self.function_index.get(name)
     }
 
@@ -61,8 +67,8 @@ pub struct Declaration<'src> {
 
 impl<'src> Declaration<'src> {
     /// Accesses the name of the function.
-    pub fn name(&self) -> &FunctionName<'src> {
-        &self.name
+    pub fn name(&self) -> FunctionName<'src> {
+        self.name
     }
 
     /// Accesses the parameters of the function.
@@ -183,8 +189,8 @@ pub struct Assignment<'src> {
 
 impl<'src> Assignment<'src> {
     /// Accesses the variable that is being assigned.
-    pub fn name(&self) -> &VariableName<'src> {
-        &self.name
+    pub fn name(&self) -> VariableName<'src> {
+        self.name
     }
 
     /// Accesses the expression that produces the assignment value.
@@ -678,20 +684,16 @@ struct State<'src> {
 }
 
 impl<'src> State<'src> {
-    /// Enters the scope of the function body, registering all function parameters.
+    /// Enters the scope of the function body.
     ///
     /// ## Panics
     ///
-    /// This method panics if there are defined variables.
-    /// The set of defined variables must be cleared via [`State::leave_function`]
-    /// before analyzing the next function.
+    /// This method panics if the state is currently inside another function body.
+    /// Before calling this function, the state must leave the previous function body
+    /// via [`State::leave_function`].
     /// Nested function definitions are not supported.
-    pub fn enter_function(
-        &mut self,
-        params: &[VariableName<'src>],
-        span_params: &[SimpleSpan],
-    ) -> Result<(), Error> {
-        debug_assert_eq!(params.len(), span_params.len());
+    pub fn enter_function(&mut self, f: &parse::Function<'src>) -> Result<(), Error> {
+        debug_assert_eq!(f.params().len(), f.params().len());
         debug_assert!(
             self.variable_definition.is_empty()
                 && self.alias_resolver.is_empty()
@@ -699,27 +701,28 @@ impl<'src> State<'src> {
             "did you forget to leave the previous function?"
         );
 
-        for i in 0..params.len() {
-            if let Err(previous_span) = self.define_variable(params[i], span_params[i]) {
+        for i in 0..f.params().len() {
+            if let Err(previous_span) = self.define_variable(f.params()[i], f.span_params()[i]) {
                 let error = Error::new(
-                    format!("parameter `{}` cannot appear twice", params[i]),
-                    span_params[i],
+                    format!("parameter `{}` cannot appear twice", f.params()[i]),
+                    f.span_params()[i],
                 )
                 .in_context(
-                    format!("first appearance of `{}`", params[i]),
+                    format!("first appearance of `{}`", f.params()[i]),
                     previous_span,
                 )
                 .in_context(
-                    format!("duplicate appearance of `{}`", params[i]),
-                    span_params[i],
+                    format!("duplicate appearance of `{}`", f.params()[i]),
+                    f.span_params()[i],
                 );
                 return Err(error);
             }
         }
+
         Ok(())
     }
 
-    /// Leaves the scope of the current function body, clearing all variable definitions.
+    /// Leaves the scope of the current function body.
     pub fn leave_function(&mut self) {
         self.variable_definition.clear();
         self.alias_resolver.clear();
@@ -852,7 +855,7 @@ impl<'src> Declaration<'src> {
 
 impl<'src> Function<'src> {
     fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Result<Self, Error> {
-        state.enter_function(from.params(), from.span_params())?;
+        state.enter_function(from)?;
 
         let body: Arc<[Statement]> = from
             .body()

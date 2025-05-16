@@ -294,8 +294,8 @@ pub struct Assignment<'src> {
 
 impl<'src> Assignment<'src> {
     /// Accesses the variable that is being assigned.
-    pub fn name(&self) -> &VariableName<'src> {
-        &self.name
+    pub fn name(&self) -> VariableName<'src> {
+        self.name
     }
 
     /// Accesses the expression that produces the assignment value.

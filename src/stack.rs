@@ -122,6 +122,10 @@ pub fn find_shortest_transformation<T: Clone + Ord + fmt::Debug + std::hash::Has
     find_shortest_transformation2(source, target, target)
 }
 
+// ## Assumptions
+// source stack contains each item at most once
+// target stack top contains each item at most once
+// set of copied variables is disjoint from set of moved variables
 /// Computes a minimal Bitcoin script that puts the `target` on top of the `source` stack.
 ///
 /// After applying the script, the result stack consists of the `source` stack
