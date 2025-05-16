@@ -181,7 +181,7 @@ pub fn compile(program: &Program) -> bitcoin::ScriptBuf {
 }
 
 // TODO: Compile function bodies according in topological order
-
+// TODO: Drop values (parameters) that are not consumed (ensure hygiene)
 pub fn compile_function_body(function: &Function, program: &Program) -> bitcoin::ScriptBuf {
     let dependencies = get_statement_dependencies(function);
 

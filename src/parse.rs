@@ -404,7 +404,7 @@ pub enum CallName<'src> {
 impl fmt::Display for CallName<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Builtin(name) => write!(f, "{name}"),
+            Self::Builtin(name) => write!(f, "op::{name}"),
             Self::Custom(name) => write!(f, "{name}"),
         }
     }
@@ -455,7 +455,7 @@ impl<'src> Call<'src> {
 
 impl fmt::Display for Call<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "op::{}(", self.name)?;
+        write!(f, "{}(", self.name)?;
         for (index, arg) in self.args.iter().enumerate() {
             write!(f, "{arg}")?;
             if index < self.args().len() - 1 {

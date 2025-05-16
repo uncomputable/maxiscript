@@ -423,6 +423,10 @@ impl Context {
 
 #[derive(Debug, Clone, Default)]
 struct State<'src> {
+    /// The name of the current function.
+    ///
+    /// This value is `None` when the state is operating outside a function body.
+    current_function: Option<FunctionName<'src>>,
     /// Maps function names to their function declaration.
     ///
     /// The IR is constructed in two phases:
@@ -434,10 +438,14 @@ struct State<'src> {
     function_declaration: HashMap<FunctionName<'src>, Declaration<'src>>,
     /// Maps function names to their finalized IR form.
     function_definition: HashMap<FunctionName<'src>, Function<'src>>,
-    // /// Maps function names to their finalized IR form.
-    // ///
-    // /// There is an error if the same function is defined twice.
-    // function_definition: HashMap<FunctionName<'src>, Function<'src>>,
+    /// Maps functions to where they call other functions.
+    ///
+    /// This is used for pretty error messages.
+    /// ```text
+    /// `f` calls `g`: `fn f() { ... g() ... }`
+    /// `g` calls `f`: `fn g() { ... f() ... }`
+    /// ```
+    call_source: HashMap<FunctionName<'src>, Vec<(FunctionName<'src>, SimpleSpan)>>,
     /// Maps variables to the span where they were first defined.
     ///
     /// There is an error if the same variable is defined twice.
@@ -468,11 +476,14 @@ impl<'src> State<'src> {
     pub fn enter_function(&mut self, f: &parse::Function<'src>) -> Result<(), Error> {
         debug_assert_eq!(f.params().len(), f.params().len());
         debug_assert!(
-            self.variable_definition.is_empty()
+            self.current_function.is_none()
+                && self.variable_definition.is_empty()
                 && self.alias_resolver.is_empty()
                 && self.alias_source.is_empty(),
             "did you forget to leave the previous function?"
         );
+
+        self.current_function = Some(f.name());
 
         for i in 0..f.params().len() {
             if let Err(previous_span) = self.define_variable(f.params()[i], f.span_params()[i]) {
@@ -497,6 +508,7 @@ impl<'src> State<'src> {
 
     /// Leaves the scope of the current function body.
     pub fn leave_function(&mut self) {
+        self.current_function = None;
         self.variable_definition.clear();
         self.alias_resolver.clear();
         self.alias_source.clear();
@@ -551,6 +563,72 @@ impl<'src> State<'src> {
         } else {
             Err(())
         }
+    }
+
+    /// Checks if the current function is transitively called by the `called` function.
+    ///
+    /// ## Panics
+    ///
+    /// This method panics if the state is currently outside a function body.
+    pub fn check_recursive_call(
+        &self,
+        called: FunctionName<'src>,
+        call_span: SimpleSpan,
+    ) -> Result<(), Error> {
+        #[derive(Debug)]
+        enum Task<'src> {
+            Explore((FunctionName<'src>, SimpleSpan)),
+            Pop,
+        }
+
+        fn create_error<'src>(
+            current: FunctionName<'src>,
+            path: Vec<(FunctionName<'src>, SimpleSpan)>,
+        ) -> Error {
+            debug_assert!(!path.is_empty());
+            let mut error = Error::new("recursive call detected", path[0].1);
+            let mut caller = current;
+
+            for (called, span) in path {
+                error = error.in_context(format!("`{}` calls `{}`", caller, called), span);
+                caller = called;
+            }
+
+            error.with_note(
+                "Each function can only call functions of a strictly lower tier than itself.\n\
+                 Functions of the lowest tier don't call any other function.",
+            )
+        }
+
+        let origin = self
+            .current_function
+            .expect("should be inside function body");
+        let mut stack = vec![Task::Explore((called, call_span))];
+        let mut path = vec![];
+
+        while let Some(task) = stack.pop() {
+            match task {
+                Task::Explore((f, span)) => {
+                    if let Some(called_by_f) = self.call_source.get(f) {
+                        stack.reserve(called_by_f.len() + 1);
+                        stack.push(Task::Pop);
+                        stack.extend(called_by_f.iter().copied().map(Task::Explore));
+                    }
+                    path.push((f, span));
+
+                    if f == origin {
+                        return Err(create_error(origin, path));
+                    }
+                }
+                Task::Pop => {
+                    debug_assert!(!path.is_empty());
+                    path.pop();
+                }
+            }
+        }
+        debug_assert_eq!(path.len(), 1);
+
+        Ok(())
     }
 }
 
@@ -622,10 +700,13 @@ impl<'src> Declaration<'src> {
         };
         debug_assert!(!state.function_declaration.contains_key(from.name()));
         state.function_declaration.insert(from.name(), function);
+
         Ok(())
     }
 }
 
+// TODO: Detect unused parameters
+// Warn user and effectively remove parameter from function signature
 impl<'src> Function<'src> {
     fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Result<Self, Error> {
         state.enter_function(from)?;
@@ -848,6 +929,20 @@ impl<'src> Call<'src> {
                 }
             },
         };
+
+        // Update call graph and check for recursive calls
+        if let CallName::Custom(function) = &name {
+            let caller = state
+                .current_function
+                .expect("should be inside function body");
+            let called = function.name();
+            state
+                .call_source
+                .entry(caller)
+                .or_default()
+                .push((called, from.span_total()));
+            state.check_recursive_call(called, from.span_total())?;
+        }
 
         // Check that actual number of arguments matches declared number of parameters
         if from.args().len() != name.n_args() {
