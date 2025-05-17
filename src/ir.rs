@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chumsky::span::SimpleSpan;
+use itertools::Itertools;
 
 use crate::op::Operation;
 use crate::parse::{FunctionName, VariableName};
@@ -25,6 +26,10 @@ impl<'src> Program<'src> {
     /// If function `g` calls function `f`, then `f` appears before `g`.
     /// The first functions that appear don't call anything.
     /// The last function that will appear is the `main` function.
+    ///
+    /// ## Uniqueness
+    ///
+    /// Each (used) function appears exactly once in the list.
     ///
     /// ## Unused functions
     ///
@@ -688,6 +693,7 @@ impl<'src> Program<'src> {
             .map(|(name, called)| (name, called.into_iter().map(|x| x.0).collect()))
             .collect();
         let rev_sorted = sorting::topological_sort(&call_relation);
+        debug_assert_eq!(rev_sorted.iter().duplicates().next(), None);
         let items: Arc<[Function]> = rev_sorted
             .into_iter()
             .rev()

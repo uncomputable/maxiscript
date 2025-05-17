@@ -5,7 +5,7 @@ use bitcoin::script::PushBytes;
 use log::{Level, debug, log_enabled};
 
 use crate::ir::{CallName, Expression, ExpressionInner, Function, Program, Statement};
-use crate::parse::VariableName;
+use crate::parse::{FunctionName, VariableName};
 use crate::sorting;
 use crate::stack::{self, StackOp};
 
@@ -43,7 +43,6 @@ impl AsRef<PushBytes> for Position {
 #[derive(Debug, Clone, Default)]
 struct Stack<'src> {
     variables: Vec<VariableName<'src>>,
-    // TODO: Cache compiled function bodies
     // function_body: HashMap<FunctionName<'src>, bitcoin::ScriptBuf>,
 }
 
@@ -177,12 +176,24 @@ fn get_statement_dependencies<'src, 'a: 'src>(function: &'a Function) -> Depende
 }
 
 pub fn compile(program: &Program) -> bitcoin::ScriptBuf {
-    compile_function_body(program.main_function(), program)
+    let mut compiled_bodies: HashMap<FunctionName, bitcoin::ScriptBuf> = HashMap::new();
+
+    for function in program.items() {
+        let body = compile_function_body(function, &compiled_bodies);
+        debug_assert!(!compiled_bodies.contains_key(function.name()));
+        compiled_bodies.insert(function.name(), body);
+    }
+
+    compiled_bodies
+        .remove("main")
+        .expect("main function should be compiled")
 }
 
-// TODO: Compile function bodies according in topological order
 // TODO: Drop values (parameters) that are not consumed (ensure hygiene)
-pub fn compile_function_body(function: &Function, program: &Program) -> bitcoin::ScriptBuf {
+pub fn compile_function_body<'src>(
+    function: &Function<'src>,
+    compiled_bodies: &HashMap<FunctionName<'src>, bitcoin::ScriptBuf>,
+) -> bitcoin::ScriptBuf {
     let dependencies = get_statement_dependencies(function);
 
     let mut best_script = bitcoin::ScriptBuf::new();
@@ -205,14 +216,14 @@ pub fn compile_function_body(function: &Function, program: &Program) -> bitcoin:
             match statement {
                 Statement::Assignment(ass) => {
                     if let Some(expr) = ass.expression() {
-                        compile_expr(expr, program, &mut script, &mut stack, &to_copy);
+                        compile_expr(expr, compiled_bodies, &mut script, &mut stack, &to_copy);
                         stack.push_variable(ass.name());
                     } else {
                         // Inlined variable alias, which does not contribute to target code
                     }
                 }
                 Statement::UnitExpr(expr) => {
-                    compile_expr(expr, program, &mut script, &mut stack, &to_copy);
+                    compile_expr(expr, compiled_bodies, &mut script, &mut stack, &to_copy);
                 }
             }
         }
@@ -233,12 +244,12 @@ pub fn compile_function_body(function: &Function, program: &Program) -> bitcoin:
     best_script
 }
 
-fn compile_expr(
-    expr: &Expression<'_>,
-    program: &Program,
+fn compile_expr<'src>(
+    expr: &Expression<'src>,
+    compiled_bodies: &HashMap<FunctionName<'src>, bitcoin::ScriptBuf>,
     script: &mut bitcoin::ScriptBuf,
-    stack: &mut Stack,
-    to_copy: &[VariableName],
+    stack: &mut Stack<'src>,
+    to_copy: &[VariableName<'src>],
 ) {
     match expr.inner() {
         ExpressionInner::Variable(..) => {
@@ -304,16 +315,12 @@ fn compile_expr(
                     script.push_opcode(operation.serialize());
                 }
                 CallName::Custom(function) => {
-                    // FIXME: Recursive call
-                    let body_script = compile_function_body(
-                        program.get_function(function.name()).unwrap(),
-                        program,
-                    );
+                    let body_script_bytes = compiled_bodies[function.name()].as_bytes();
                     *script = bitcoin::ScriptBuf::from_bytes(
                         script
                             .as_bytes()
                             .iter()
-                            .chain(body_script.as_bytes().iter())
+                            .chain(body_script_bytes.iter())
                             .copied()
                             .collect(),
                     );
