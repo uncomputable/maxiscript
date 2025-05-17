@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -7,9 +7,9 @@ use std::sync::Arc;
 use chumsky::span::SimpleSpan;
 
 use crate::op::Operation;
-use crate::parse;
 use crate::parse::{FunctionName, VariableName};
 use crate::util::ShallowClone;
+use crate::{parse, sorting};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program<'src> {
@@ -25,6 +25,11 @@ impl<'src> Program<'src> {
     /// If function `g` calls function `f`, then `f` appears before `g`.
     /// The first functions that appear don't call anything.
     /// The last function that will appear is the `main` function.
+    ///
+    /// ## Unused functions
+    ///
+    /// Functions that are not (transitively) called by the `main` function
+    /// are not included in this list.
     pub fn items(&self) -> &[Function<'src>] {
         &self.items
     }
@@ -630,6 +635,23 @@ impl<'src> State<'src> {
 
         Ok(())
     }
+
+    /// Returns the set of functions that are transitively called by the main function.
+    ///
+    /// Functions outside of this list are not used and will not be included in the target code.
+    pub fn called_by_main(&self) -> HashSet<FunctionName<'src>> {
+        let mut visited = HashSet::new();
+        let mut stack = vec!["main"];
+
+        while let Some(f) = stack.pop() {
+            visited.insert(f);
+            if let Some(called) = self.call_source.get(f) {
+                stack.extend(called.iter().map(|x| x.0));
+            }
+        }
+
+        visited
+    }
 }
 
 impl<'src> Program<'src> {
@@ -650,11 +672,27 @@ impl<'src> Program<'src> {
         }
 
         // Step 2: Construct IR of function bodies
-        let items: Arc<[Function]> = from
+        let mut items: HashMap<FunctionName, Function> = from
             .items()
             .iter()
-            .map(|function| Function::analyze(function, &mut state))
+            .map(|f| Function::analyze(f, &mut state).map(|f| (f.name(), f)))
             .collect::<Result<_, _>>()?;
+
+        // Step 3: Topologically sort functions that are called by main
+        // TODO: Warn about unused functions. Requires non-error warnings
+        let used_functions = state.called_by_main();
+        let call_relation: HashMap<FunctionName, HashSet<FunctionName>> = state
+            .call_source
+            .into_iter()
+            .filter(|(name, _)| used_functions.contains(name))
+            .map(|(name, called)| (name, called.into_iter().map(|x| x.0).collect()))
+            .collect();
+        let rev_sorted = sorting::topological_sort(&call_relation);
+        let items: Arc<[Function]> = rev_sorted
+            .into_iter()
+            .rev()
+            .map(|name| items.remove(name).expect("function should be analyzed"))
+            .collect();
 
         Ok(Self {
             items,
