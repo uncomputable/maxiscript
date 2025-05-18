@@ -15,7 +15,6 @@ use crate::{Diagnostic, parse, sorting};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program<'src> {
     items: Arc<[Function<'src>]>,
-    function_index: Arc<HashMap<FunctionName<'src>, Function<'src>>>,
 }
 
 impl<'src> Program<'src> {
@@ -39,11 +38,6 @@ impl<'src> Program<'src> {
         &self.items
     }
 
-    /// Gets the function of the given `name`, if it exists.
-    pub fn get_function(&self, name: FunctionName<'src>) -> Option<&Function<'src>> {
-        self.function_index.get(name)
-    }
-
     /// Accesses the main function of the program.
     pub fn main_function(&self) -> &Function {
         self.items
@@ -57,7 +51,6 @@ impl ShallowClone for Program<'_> {
     fn shallow_clone(&self) -> Self {
         Self {
             items: self.items.shallow_clone(),
-            function_index: self.function_index.shallow_clone(),
         }
     }
 }
@@ -357,8 +350,6 @@ struct State<'src> {
     ///
     /// The two-phase designs allows functions to be used before they are defined.
     function_declaration: HashMap<FunctionName<'src>, Declaration<'src>>,
-    /// Maps function names to their finalized IR form.
-    function_definition: HashMap<FunctionName<'src>, Function<'src>>,
     /// Maps functions to where they call other functions.
     ///
     /// This is used for pretty error messages.
@@ -631,10 +622,7 @@ impl<'src> Program<'src> {
             .map(|name| items.remove(name).expect("function should be analyzed"))
             .collect();
 
-        let program = Self {
-            items,
-            function_index: Arc::new(state.function_definition),
-        };
+        let program = Self { items };
         (Some(program), state.errors)
     }
 }
@@ -752,13 +740,6 @@ impl<'src> Function<'src> {
             body,
             final_expr,
         };
-        debug_assert!(
-            !state.function_definition.contains_key(from.name()),
-            "we should visit each function only once"
-        );
-        state
-            .function_definition
-            .insert(from.name(), function.shallow_clone());
 
         Some(function)
     }
