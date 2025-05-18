@@ -718,9 +718,17 @@ impl<'src> Program<'src> {
             None => return (None, state.errors),
         };
 
-        // Step 3: Topologically sort functions that are called by main
-        // TODO: Warn about unused functions. Requires non-error warnings
+        // Step 3: Filter out unused functions
         let used_functions = state.called_by_main();
+
+        for name in items.keys().filter(|&name| !used_functions.contains(name)) {
+            let span = items[name].declaration.span_name;
+            let error = Diagnostic::warning("function is never used", span)
+                .in_context2(format!("`{name}` is never called"), span);
+            state.errors.push(error);
+        }
+
+        // Step 4: Topologically sort functions that are called by main
         let call_relation: HashMap<FunctionName, HashSet<FunctionName>> = state
             .call_source
             .into_iter()
