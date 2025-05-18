@@ -128,10 +128,7 @@ fn get_statement_dependencies<'src, 'a: 'src>(function: &'a Function) -> Depende
         let expr = match statement {
             Statement::Assignment(ass) => {
                 defined_in.insert(ass.name(), statement);
-                match ass.expression() {
-                    None => continue,
-                    Some(x) => x,
-                }
+                ass.expression()
             }
             Statement::UnitExpr(expr) => expr,
         };
@@ -215,12 +212,14 @@ pub fn compile_function_body<'src>(
 
             match statement {
                 Statement::Assignment(ass) => {
-                    if let Some(expr) = ass.expression() {
-                        compile_expr(expr, compiled_bodies, &mut script, &mut stack, &to_copy);
-                        stack.push_variable(ass.name());
-                    } else {
-                        // Inlined variable alias, which does not contribute to target code
-                    }
+                    compile_expr(
+                        ass.expression(),
+                        compiled_bodies,
+                        &mut script,
+                        &mut stack,
+                        &to_copy,
+                    );
+                    stack.push_variable(ass.name());
                 }
                 Statement::UnitExpr(expr) => {
                     compile_expr(expr, compiled_bodies, &mut script, &mut stack, &to_copy);

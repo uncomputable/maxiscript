@@ -64,6 +64,7 @@ pub struct Declaration<'src> {
     params: Arc<[VariableName<'src>]>,
     is_unit: bool,
     span_name: SimpleSpan,
+    span_params: Arc<[SimpleSpan]>,
     span_params_total: SimpleSpan,
     span_return: SimpleSpan,
 }
@@ -94,6 +95,11 @@ impl<'src> Declaration<'src> {
         self.span_name
     }
 
+    /// Accesses the spans of each parameter of the function.
+    pub fn span_params(&self) -> &[SimpleSpan] {
+        &self.span_params
+    }
+
     /// Accesses the span over all parameters of the function.
     pub fn span_params_total(&self) -> SimpleSpan {
         self.span_params_total
@@ -112,6 +118,7 @@ impl ShallowClone for Declaration<'_> {
             params: self.params.shallow_clone(),
             is_unit: self.is_unit,
             span_name: self.span_name,
+            span_params: self.span_params.shallow_clone(),
             span_params_total: self.span_params_total,
             span_return: self.span_return,
         }
@@ -187,7 +194,7 @@ impl ShallowClone for Statement<'_> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Assignment<'src> {
     name: VariableName<'src>,
-    expression: Option<Expression<'src>>,
+    expression: Expression<'src>,
 }
 
 impl<'src> Assignment<'src> {
@@ -197,10 +204,8 @@ impl<'src> Assignment<'src> {
     }
 
     /// Accesses the expression that produces the assignment value.
-    ///
-    /// Returns `None` if the assignment was a variable alias that was inlined.
-    pub fn expression(&self) -> Option<&Expression<'src>> {
-        self.expression.as_ref()
+    pub fn expression(&self) -> &Expression<'src> {
+        &self.expression
     }
 }
 
@@ -266,7 +271,6 @@ pub enum CallName<'src> {
     Custom(Declaration<'src>),
 }
 
-#[allow(clippy::needless_lifetimes)]
 impl<'src> CallName<'src> {
     /// Returns the number of arguments that this function takes as input.
     pub fn n_args(&self) -> usize {
@@ -472,11 +476,19 @@ impl<'src> State<'src> {
     /// All names of the same class have the same canonical form.
     ///
     /// This method returns an error if the variable has not been defined.
-    pub fn resolve_alias(&self, name: VariableName<'src>) -> Result<VariableName<'src>, ()> {
+    pub fn resolve_alias(
+        &mut self,
+        name: VariableName<'src>,
+        span: SimpleSpan,
+    ) -> Option<VariableName<'src>> {
         if self.variable_definition.contains_key(name) {
-            Ok(self.alias_resolver.get(name).copied().unwrap_or(name))
+            Some(self.alias_resolver.get(name).copied().unwrap_or(name))
         } else {
-            Err(())
+            let error = Diagnostic::error(format!("variable `{name}` has not been defined"), span)
+                .in_context("cannot find definition", span);
+            self.errors.push(error);
+
+            None
         }
     }
 
@@ -661,6 +673,7 @@ impl<'src> Declaration<'src> {
             params: from.params().shallow_clone(),
             is_unit: from.is_unit(),
             span_name: from.span_name(),
+            span_params: from.span_params().shallow_clone(),
             span_params_total: from.span_params_total(),
             span_return: from.span_return(),
         };
@@ -675,16 +688,29 @@ impl<'src> Declaration<'src> {
 // Warn user and effectively remove parameter from function signature
 impl<'src> Function<'src> {
     fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Option<Self> {
+        let declaration = state
+            .function_declaration
+            .get(from.name())
+            .expect("all function should be declared at this point")
+            .shallow_clone();
+
         state.enter_function(from)?;
 
-        let body: Arc<[Statement]> = from
+        let body: Vec<Option<Statement>> = from
             .body()
             .iter()
             .map(|stmt| Statement::analyze(stmt, state))
             .collect::<Option<_>>()?;
+        let body: Arc<[Statement]> = body.into_iter().flatten().collect();
         let final_expr = match from.final_expr() {
             Some(expr) => Some(Expression::analyze(expr, state).map(Arc::new)?),
             None => None,
+        };
+
+        // Type-check function body
+        let body_is_unit = match &final_expr {
+            Some(expr) => expr.is_unit(),
+            None => true,
         };
         let body_return_span = from
             .final_expr()
@@ -695,12 +721,6 @@ impl<'src> Function<'src> {
                     .map(|stmt| stmt.span())
                     .unwrap_or_else(|| from.span_body())
             });
-
-        let body_is_unit = match &final_expr {
-            Some(expr) => expr.is_unit(),
-            None => true,
-        };
-
         if from.is_unit() && !body_is_unit {
             let error = Diagnostic::error("mismatched types", from.span_total())
                 .in_context(
@@ -730,11 +750,6 @@ impl<'src> Function<'src> {
 
         state.leave_function();
 
-        let declaration = state
-            .function_declaration
-            .get(from.name())
-            .expect("all function should be declared at this point")
-            .shallow_clone();
         let function = Function {
             declaration,
             body,
@@ -746,10 +761,15 @@ impl<'src> Function<'src> {
 }
 
 impl<'src> Statement<'src> {
-    fn analyze(from: &parse::Statement<'src>, state: &mut State<'src>) -> Option<Self> {
+    /// ## Returns
+    ///
+    /// - `Some(Some(x))` if the statement was successfully constructed.
+    /// - `Some(None)` if the statement was inlined. The `state` implicitly carries this information.
+    /// - `None` if there was an error in the parse tree.
+    fn analyze(from: &parse::Statement<'src>, state: &mut State<'src>) -> Option<Option<Self>> {
         match from {
             parse::Statement::Assignment(ass) => {
-                Assignment::analyze(ass, state).map(Self::Assignment)
+                Assignment::analyze(ass, state).map(|ass| ass.map(Self::Assignment))
             }
             parse::Statement::UnitExpr(parse_expr) => {
                 let expr = Expression::analyze(parse_expr, state)?;
@@ -776,14 +796,19 @@ impl<'src> Statement<'src> {
                     return None;
                 }
 
-                Some(Self::UnitExpr(expr))
+                Some(Some(Self::UnitExpr(expr)))
             }
         }
     }
 }
 
 impl<'src> Assignment<'src> {
-    fn analyze(from: &parse::Assignment<'src>, state: &mut State<'src>) -> Option<Self> {
+    /// ## Returns
+    ///
+    /// - `Some(Some(x))` if the assignment was successfully constructed.
+    /// - `Some(None)` if the assignment was inlined. The `state` implicitly carries this information.
+    /// - `None` if there was an error in the parse tree.
+    fn analyze(from: &parse::Assignment<'src>, state: &mut State<'src>) -> Option<Option<Self>> {
         if let Err(previous_span) = state.define_variable(from.name(), from.span_name()) {
             let error = Diagnostic::error(
                 format!("variable `{}` cannot be defined twice", from.name()),
@@ -804,10 +829,7 @@ impl<'src> Assignment<'src> {
         // Inline variable alias
         if let parse::ExpressionInner::Variable(parent) = from.expression().inner() {
             state.define_variable_alias(from.name(), parent, from.span_total());
-            return Some(Self {
-                name: from.name(),
-                expression: None,
-            });
+            return Some(None);
         }
 
         let expr = Expression::analyze(from.expression(), state)?;
@@ -835,31 +857,23 @@ impl<'src> Assignment<'src> {
             return None;
         }
 
-        Some(Self {
+        Some(Some(Self {
             name: from.name(),
-            expression: Some(expr),
-        })
+            expression: expr,
+        }))
     }
 }
 
 impl<'src> Expression<'src> {
     fn analyze(from: &parse::Expression<'src>, state: &mut State<'src>) -> Option<Self> {
         match from.inner() {
-            parse::ExpressionInner::Variable(name) => state
-                .resolve_alias(name)
-                .map(|resolved| Self {
+            parse::ExpressionInner::Variable(name) => {
+                let resolved = state.resolve_alias(name, from.span())?;
+                Some(Self {
                     inner: ExpressionInner::Variable(resolved),
                     is_unit: false,
                 })
-                .map_err(|_| {
-                    let error = Diagnostic::error(
-                        format!("variable `{}` has not been defined", name),
-                        from.span(),
-                    )
-                    .in_context("cannot find definition", from.span());
-                    state.errors.push(error);
-                })
-                .ok(),
+            }
             parse::ExpressionInner::Bytes(bytes) => Some(Self {
                 inner: ExpressionInner::Bytes(bytes.shallow_clone()),
                 is_unit: false,
@@ -958,19 +972,7 @@ impl<'src> Call<'src> {
         // Check that all arguments have been defined
         debug_assert_eq!(from.args().len(), from.span_args().len());
         let args: Arc<[VariableName]> = (0..from.args().len())
-            .map(|i| match state.resolve_alias(from.args()[i]) {
-                Ok(resolved) => Some(resolved),
-                Err(_) => {
-                    let error = Diagnostic::error(
-                        format!("variable `{}` has not been defined", from.args()[i]),
-                        from.span_args()[i],
-                    )
-                    .in_context("cannot find definition", from.span_args()[i]);
-                    state.errors.push(error);
-
-                    None
-                }
-            })
+            .map(|i| state.resolve_alias(from.args()[i], from.span_args()[i]))
             .collect::<Option<_>>()?;
 
         // Check that no argument appears twice (counterintuitive limitation of current compiler)

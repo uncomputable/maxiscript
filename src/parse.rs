@@ -180,7 +180,7 @@ impl<'src> Function<'src> {
     }
 
     /// Accesses the spans of each parameter of the function.
-    pub fn span_params(&self) -> &[SimpleSpan] {
+    pub fn span_params(&self) -> &Arc<[SimpleSpan]> {
         &self.span_params
     }
 
