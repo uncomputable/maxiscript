@@ -12,6 +12,7 @@ mod stack;
 mod util;
 
 pub use compile::compile;
+pub use {ir::Diagnostic, ir::Severity};
 
 pub fn lex_program(src: &str) -> (Option<Vec<Spanned<Token>>>, Vec<Rich<String>>) {
     let (tokens, lex_errors) = lexer().parse(src).into_output_errors();
@@ -38,7 +39,7 @@ pub fn parse_program<'src>(
 
 pub fn analyze<'src>(
     program: &parse::Program<'src>,
-) -> (Option<ir::Program<'src>>, Vec<ir::Error>) {
+) -> (Option<ir::Program<'src>>, Vec<Diagnostic>) {
     ir::Program::analyze(program)
 }
 

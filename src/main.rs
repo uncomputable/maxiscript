@@ -1,7 +1,7 @@
 use std::{env, fs};
 
 use ariadne::{Color, Label, Report, ReportKind, sources};
-use bitfony::{analyze, compile, lex_program, parse_program};
+use bitfony::{Severity, analyze, compile, lex_program, parse_program};
 use hex_conservative::DisplayHex;
 use log::info;
 
@@ -55,22 +55,23 @@ fn main() {
     });
 
     ir_errors.into_iter().for_each(|e| {
-        let mut report = Report::build(
-            ReportKind::Error,
-            (filename.clone(), e.top().span().into_range()),
-        )
-        .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
-        .with_message(e.top().message())
-        .with_labels(e.contexts().iter().map(|ctx| {
-            Label::new((filename.clone(), ctx.span().into_range()))
-                .with_message(ctx.message())
-                .with_color(Color::Red)
-        }))
-        .with_labels(e.contexts2().iter().map(|ctx| {
-            Label::new((filename.clone(), ctx.span().into_range()))
-                .with_message(ctx.message())
-                .with_color(Color::Yellow)
-        }));
+        let kind = match e.severity() {
+            Severity::Error => ReportKind::Error,
+            Severity::Warning => ReportKind::Warning,
+        };
+        let mut report = Report::build(kind, (filename.clone(), e.top().span().into_range()))
+            .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
+            .with_message(e.top().message())
+            .with_labels(e.contexts().iter().map(|ctx| {
+                Label::new((filename.clone(), ctx.span().into_range()))
+                    .with_message(ctx.message())
+                    .with_color(Color::Red)
+            }))
+            .with_labels(e.contexts2().iter().map(|ctx| {
+                Label::new((filename.clone(), ctx.span().into_range()))
+                    .with_message(ctx.message())
+                    .with_color(Color::Yellow)
+            }));
         if let Some(note) = e.note() {
             report = report.with_note(note);
         }

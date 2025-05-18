@@ -343,15 +343,22 @@ impl ShallowClone for Call<'_> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct Error {
+pub struct Diagnostic {
     top: Context,
     contexts: Vec<Context>,
     contexts2: Vec<Context>,
     note: Option<String>,
+    severity: Severity,
 }
 
-impl Error {
-    pub fn new<Str: ToString>(message: Str, span: SimpleSpan) -> Self {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+impl Diagnostic {
+    fn new<Str: ToString>(message: Str, span: SimpleSpan, severity: Severity) -> Self {
         Self {
             top: Context {
                 message: message.to_string(),
@@ -360,7 +367,16 @@ impl Error {
             contexts: Vec::new(),
             contexts2: Vec::new(),
             note: None,
+            severity,
         }
+    }
+
+    pub fn error<Str: ToString>(message: Str, span: SimpleSpan) -> Self {
+        Self::new(message, span, Severity::Error)
+    }
+
+    pub fn warning<Str: ToString>(message: Str, span: SimpleSpan) -> Self {
+        Self::new(message, span, Severity::Warning)
     }
 
     pub fn in_context<Str: ToString>(mut self, message: Str, span: SimpleSpan) -> Self {
@@ -373,6 +389,7 @@ impl Error {
             contexts: self.contexts,
             contexts2: self.contexts2,
             note: self.note,
+            severity: self.severity,
         }
     }
 
@@ -386,6 +403,7 @@ impl Error {
             contexts: self.contexts,
             contexts2: self.contexts2,
             note: self.note,
+            severity: self.severity,
         }
     }
 
@@ -395,6 +413,7 @@ impl Error {
             contexts: self.contexts,
             contexts2: self.contexts2,
             note: Some(message.to_string()),
+            severity: self.severity,
         }
     }
 
@@ -412,6 +431,10 @@ impl Error {
 
     pub fn note(&self) -> Option<&String> {
         self.note.as_ref()
+    }
+
+    pub fn severity(&self) -> Severity {
+        self.severity
     }
 }
 
@@ -473,7 +496,7 @@ struct State<'src> {
     /// ```
     alias_source: HashMap<VariableName<'src>, (VariableName<'src>, SimpleSpan)>,
     /// List of encountered errors.
-    errors: Vec<Error>,
+    errors: Vec<Diagnostic>,
 }
 
 impl<'src> State<'src> {
@@ -499,7 +522,7 @@ impl<'src> State<'src> {
 
         for i in 0..f.params().len() {
             if let Err(previous_span) = self.define_variable(f.params()[i], f.span_params()[i]) {
-                let error = Error::new(
+                let error = Diagnostic::error(
                     format!("parameter `{}` cannot appear twice", f.params()[i]),
                     f.span_params()[i],
                 )
@@ -597,9 +620,9 @@ impl<'src> State<'src> {
         fn create_error<'src>(
             current: FunctionName<'src>,
             path: Vec<(FunctionName<'src>, SimpleSpan)>,
-        ) -> Error {
+        ) -> Diagnostic {
             debug_assert!(!path.is_empty());
-            let mut error = Error::new("recursive call detected", path[0].1);
+            let mut error = Diagnostic::error("recursive call detected", path[0].1);
             let mut caller = current;
 
             for (called, span) in path {
@@ -664,7 +687,7 @@ impl<'src> State<'src> {
 }
 
 impl<'src> Program<'src> {
-    pub fn analyze(from: &parse::Program<'src>) -> (Option<Self>, Vec<Error>) {
+    pub fn analyze(from: &parse::Program<'src>) -> (Option<Self>, Vec<Diagnostic>) {
         let mut state = State::default();
 
         // Step 1: Populate state with all declared functions
@@ -675,7 +698,7 @@ impl<'src> Program<'src> {
         }
 
         if !state.function_declaration.contains_key("main") {
-            let error = Error::new(
+            let error = Diagnostic::error(
                 "the `main` function is missing from the program",
                 from.span(),
             )
@@ -723,7 +746,7 @@ impl<'src> Program<'src> {
 impl<'src> Declaration<'src> {
     fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Option<()> {
         if let Some(already_defined) = state.function_declaration.get(from.name()) {
-            let error = Error::new(
+            let error = Diagnostic::error(
                 format!("function `{}` is defined multiple times", from.name()),
                 from.span_name(),
             )
@@ -739,7 +762,7 @@ impl<'src> Declaration<'src> {
             return None;
         }
         if !from.is_unit() && from.name() == "main" {
-            let error = Error::new("mismatched types", from.span_total())
+            let error = Diagnostic::error("mismatched types", from.span_total())
                 .in_context(
                     "function `main` is declared to return a value",
                     from.span_return(),
@@ -795,7 +818,7 @@ impl<'src> Function<'src> {
         };
 
         if from.is_unit() && !body_is_unit {
-            let error = Error::new("mismatched types", from.span_total())
+            let error = Diagnostic::error("mismatched types", from.span_total())
                 .in_context(
                     format!("function `{}` is declared to return nothing", from.name()),
                     from.span_return(),
@@ -808,7 +831,7 @@ impl<'src> Function<'src> {
             return None;
         }
         if !from.is_unit() && body_is_unit {
-            let error = Error::new("mismatched types", from.span_total())
+            let error = Diagnostic::error("mismatched types", from.span_total())
                 .in_context(
                     format!("function `{}` is declared to return a value", from.name()),
                     from.span_return(),
@@ -854,7 +877,7 @@ impl<'src> Statement<'src> {
             parse::Statement::UnitExpr(parse_expr) => {
                 let expr = Expression::analyze(parse_expr, state)?;
                 if !expr.is_unit {
-                    let mut error = Error::new(
+                    let mut error = Diagnostic::error(
                         "expected expression that nothing, but got expression that returns something".to_string(),
                         parse_expr.span(),
                     ).in_context("outside a let statement, an expression is not allowed to return any output", parse_expr.span());
@@ -885,7 +908,7 @@ impl<'src> Statement<'src> {
 impl<'src> Assignment<'src> {
     fn analyze(from: &parse::Assignment<'src>, state: &mut State<'src>) -> Option<Self> {
         if let Err(previous_span) = state.define_variable(from.name(), from.span_name()) {
-            let error = Error::new(
+            let error = Diagnostic::error(
                 format!("variable `{}` cannot be defined twice", from.name()),
                 from.span_name(),
             )
@@ -912,7 +935,7 @@ impl<'src> Assignment<'src> {
 
         let expr = Expression::analyze(from.expression(), state)?;
         if expr.is_unit {
-            let mut error = Error::new(
+            let mut error = Diagnostic::error(
                 "expected expression that returns something, but got expression that returns nothing",
                 from.expression().span(),
             ).in_context("this expression should return something", from.expression().span())
@@ -952,7 +975,7 @@ impl<'src> Expression<'src> {
                     is_unit: false,
                 })
                 .map_err(|_| {
-                    let error = Error::new(
+                    let error = Diagnostic::error(
                         format!("variable `{}` has not been defined", name),
                         from.span(),
                     )
@@ -979,10 +1002,11 @@ impl<'src> Call<'src> {
             parse::CallName::Builtin(name) => match Operation::from_str(name) {
                 Ok(opcode) => CallName::Builtin(opcode),
                 Err(_) => {
-                    let error = Error::new("unexpected operation", from.span_name()).in_context(
-                        format!("`{}` is not in the list of known operations", from.name()),
-                        from.span_name(),
-                    );
+                    let error = Diagnostic::error("unexpected operation", from.span_name())
+                        .in_context(
+                            format!("`{}` is not in the list of known operations", from.name()),
+                            from.span_name(),
+                        );
                     state.errors.push(error);
 
                     return None;
@@ -991,7 +1015,7 @@ impl<'src> Call<'src> {
             parse::CallName::Custom(name) => match state.function_declaration.get(name) {
                 Some(function) => CallName::Custom(function.shallow_clone()),
                 None => {
-                    let error = Error::new(
+                    let error = Diagnostic::error(
                         format!("function `{}` has not been defined", name),
                         from.span_name(),
                     )
@@ -1019,7 +1043,7 @@ impl<'src> Call<'src> {
 
         // Check that actual number of arguments matches declared number of parameters
         if from.args().len() != name.n_args() {
-            let mut error = Error::new(
+            let mut error = Diagnostic::error(
                 format!(
                     "this function takes {} arguments, but {} arguments were supplied",
                     from.args().len(),
@@ -1060,7 +1084,7 @@ impl<'src> Call<'src> {
             .map(|i| match state.resolve_alias(from.args()[i]) {
                 Ok(resolved) => Some(resolved),
                 Err(_) => {
-                    let error = Error::new(
+                    let error = Diagnostic::error(
                         format!("variable `{}` has not been defined", from.args()[i]),
                         from.span_args()[i],
                     )
@@ -1076,7 +1100,7 @@ impl<'src> Call<'src> {
         let mut arg_definition: HashMap<VariableName, SimpleSpan> = HashMap::new();
         for i in 0..args.len() {
             if let Some(&previous_span) = arg_definition.get(args[i]) {
-                let mut error = Error::new(
+                let mut error = Diagnostic::error(
                     format!("argument `{}` cannot appear twice", args[i]),
                     from.span_args()[i],
                 )
