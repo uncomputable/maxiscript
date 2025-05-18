@@ -4,6 +4,7 @@ use chumsky::prelude::{Input, Rich};
 use crate::parse::{Spanned, Token, lexer, program_parser};
 
 mod compile;
+mod error;
 mod ir;
 mod op;
 mod parse;
@@ -12,7 +13,7 @@ mod stack;
 mod util;
 
 pub use compile::compile;
-pub use {ir::Diagnostic, ir::Severity};
+pub use error::{Diagnostic, Severity};
 
 pub fn lex_program(src: &str) -> (Option<Vec<Spanned<Token>>>, Vec<Rich<String>>) {
     let (tokens, lex_errors) = lexer().parse(src).into_output_errors();
