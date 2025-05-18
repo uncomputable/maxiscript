@@ -25,15 +25,13 @@ fn main() {
 
     if let Some(parse_program) = parse_program {
         info!("Compiling Bitfony program:\n{parse_program}");
-        match analyze(&parse_program) {
-            Ok(ir_program) => {
-                let bitcoin_script = compile(&ir_program);
-                info!("Resulting Bitcoin script:\n{bitcoin_script:?}");
-                println!("{}", bitcoin_script.as_bytes().to_lower_hex_string());
-            }
-            Err(error) => {
-                ir_errors.push(error);
-            }
+        let (ir_program, errors) = analyze(&parse_program);
+        ir_errors.extend(errors);
+
+        if let Some(ir_program) = ir_program {
+            let bitcoin_script = compile(&ir_program);
+            info!("Resulting Bitcoin script:\n{bitcoin_script:?}");
+            println!("{}", bitcoin_script.as_bytes().to_lower_hex_string());
         }
     }
 

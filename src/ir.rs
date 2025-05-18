@@ -472,6 +472,8 @@ struct State<'src> {
     /// `y` is aliased to `z`: `let y = z;`
     /// ```
     alias_source: HashMap<VariableName<'src>, (VariableName<'src>, SimpleSpan)>,
+    /// List of encountered errors.
+    errors: Vec<Error>,
 }
 
 impl<'src> State<'src> {
@@ -483,7 +485,7 @@ impl<'src> State<'src> {
     /// Before calling this function, the state must leave the previous function body
     /// via [`State::leave_function`].
     /// Nested function definitions are not supported.
-    pub fn enter_function(&mut self, f: &parse::Function<'src>) -> Result<(), Error> {
+    pub fn enter_function(&mut self, f: &parse::Function<'src>) -> Option<()> {
         debug_assert_eq!(f.params().len(), f.params().len());
         debug_assert!(
             self.current_function.is_none()
@@ -509,11 +511,12 @@ impl<'src> State<'src> {
                     format!("duplicate appearance of `{}`", f.params()[i]),
                     f.span_params()[i],
                 );
-                return Err(error);
+                self.errors.push(error);
+                return None;
             }
         }
 
-        Ok(())
+        Some(())
     }
 
     /// Leaves the scope of the current function body.
@@ -581,10 +584,10 @@ impl<'src> State<'src> {
     ///
     /// This method panics if the state is currently outside a function body.
     pub fn check_recursive_call(
-        &self,
+        &mut self,
         called: FunctionName<'src>,
         call_span: SimpleSpan,
-    ) -> Result<(), Error> {
+    ) -> Option<()> {
         #[derive(Debug)]
         enum Task<'src> {
             Explore((FunctionName<'src>, SimpleSpan)),
@@ -627,7 +630,8 @@ impl<'src> State<'src> {
                     path.push((f, span));
 
                     if f == origin {
-                        return Err(create_error(origin, path));
+                        self.errors.push(create_error(origin, path));
+                        return None;
                     }
                 }
                 Task::Pop => {
@@ -638,7 +642,7 @@ impl<'src> State<'src> {
         }
         debug_assert_eq!(path.len(), 1);
 
-        Ok(())
+        Some(())
     }
 
     /// Returns the set of functions that are transitively called by the main function.
@@ -660,28 +664,36 @@ impl<'src> State<'src> {
 }
 
 impl<'src> Program<'src> {
-    pub fn analyze(from: &parse::Program<'src>) -> Result<Self, Error> {
+    pub fn analyze(from: &parse::Program<'src>) -> (Option<Self>, Vec<Error>) {
         let mut state = State::default();
 
         // Step 1: Populate state with all declared functions
         for function in from.items() {
-            Declaration::analyze(function, &mut state)?;
+            if Declaration::analyze(function, &mut state).is_none() {
+                return (None, state.errors);
+            }
         }
 
         if !state.function_declaration.contains_key("main") {
-            return Err(Error::new(
+            let error = Error::new(
                 "the `main` function is missing from the program",
                 from.span(),
             )
-            .with_note("every program needs to have a `main` function"));
+            .with_note("every program needs to have a `main` function");
+            state.errors.push(error);
+            return (None, state.errors);
         }
 
         // Step 2: Construct IR of function bodies
-        let mut items: HashMap<FunctionName, Function> = from
+        let mut items: HashMap<FunctionName, Function> = match from
             .items()
             .iter()
             .map(|f| Function::analyze(f, &mut state).map(|f| (f.name(), f)))
-            .collect::<Result<_, _>>()?;
+            .collect::<Option<_>>()
+        {
+            Some(items) => items,
+            None => return (None, state.errors),
+        };
 
         // Step 3: Topologically sort functions that are called by main
         // TODO: Warn about unused functions. Requires non-error warnings
@@ -700,15 +712,16 @@ impl<'src> Program<'src> {
             .map(|name| items.remove(name).expect("function should be analyzed"))
             .collect();
 
-        Ok(Self {
+        let program = Self {
             items,
             function_index: Arc::new(state.function_definition),
-        })
+        };
+        (Some(program), state.errors)
     }
 }
 
 impl<'src> Declaration<'src> {
-    fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Result<(), Error> {
+    fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Option<()> {
         if let Some(already_defined) = state.function_declaration.get(from.name()) {
             let error = Error::new(
                 format!("function `{}` is defined multiple times", from.name()),
@@ -722,7 +735,8 @@ impl<'src> Declaration<'src> {
                 format!("`{}` redefined here", from.name()),
                 from.span_name(),
             );
-            return Err(error);
+            state.errors.push(error);
+            return None;
         }
         if !from.is_unit() && from.name() == "main" {
             let error = Error::new("mismatched types", from.span_total())
@@ -731,7 +745,8 @@ impl<'src> Declaration<'src> {
                     from.span_return(),
                 )
                 .with_note("the `main` function can never return a value");
-            return Err(error);
+            state.errors.push(error);
+            return None;
         }
 
         let function = Declaration {
@@ -745,25 +760,25 @@ impl<'src> Declaration<'src> {
         debug_assert!(!state.function_declaration.contains_key(from.name()));
         state.function_declaration.insert(from.name(), function);
 
-        Ok(())
+        Some(())
     }
 }
 
 // TODO: Detect unused parameters
 // Warn user and effectively remove parameter from function signature
 impl<'src> Function<'src> {
-    fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Result<Self, Error> {
+    fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Option<Self> {
         state.enter_function(from)?;
 
         let body: Arc<[Statement]> = from
             .body()
             .iter()
             .map(|stmt| Statement::analyze(stmt, state))
-            .collect::<Result<_, _>>()?;
-        let final_expr = from
-            .final_expr()
-            .map(|expr| Expression::analyze(expr, state).map(Arc::new))
-            .transpose()?;
+            .collect::<Option<_>>()?;
+        let final_expr = match from.final_expr() {
+            Some(expr) => Some(Expression::analyze(expr, state).map(Arc::new)?),
+            None => None,
+        };
         let body_return_span = from
             .final_expr()
             .map(|expr| expr.span())
@@ -789,7 +804,8 @@ impl<'src> Function<'src> {
                     format!("the last line of `{}` returns a value", from.name()),
                     body_return_span,
                 );
-            return Err(error);
+            state.errors.push(error);
+            return None;
         }
         if !from.is_unit() && body_is_unit {
             let error = Error::new("mismatched types", from.span_total())
@@ -801,7 +817,8 @@ impl<'src> Function<'src> {
                     format!("the last line of `{}` returns nothing", from.name()),
                     body_return_span,
                 );
-            return Err(error);
+            state.errors.push(error);
+            return None;
         }
 
         state.leave_function();
@@ -823,12 +840,13 @@ impl<'src> Function<'src> {
         state
             .function_definition
             .insert(from.name(), function.shallow_clone());
-        Ok(function)
+
+        Some(function)
     }
 }
 
 impl<'src> Statement<'src> {
-    fn analyze(from: &parse::Statement<'src>, state: &mut State<'src>) -> Result<Self, Error> {
+    fn analyze(from: &parse::Statement<'src>, state: &mut State<'src>) -> Option<Self> {
         match from {
             parse::Statement::Assignment(ass) => {
                 Assignment::analyze(ass, state).map(Self::Assignment)
@@ -854,16 +872,18 @@ impl<'src> Statement<'src> {
                         };
                     }
 
-                    return Err(error);
+                    state.errors.push(error);
+                    return None;
                 }
-                Ok(Self::UnitExpr(expr))
+
+                Some(Self::UnitExpr(expr))
             }
         }
     }
 }
 
 impl<'src> Assignment<'src> {
-    fn analyze(from: &parse::Assignment<'src>, state: &mut State<'src>) -> Result<Self, Error> {
+    fn analyze(from: &parse::Assignment<'src>, state: &mut State<'src>) -> Option<Self> {
         if let Err(previous_span) = state.define_variable(from.name(), from.span_name()) {
             let error = Error::new(
                 format!("variable `{}` cannot be defined twice", from.name()),
@@ -877,13 +897,14 @@ impl<'src> Assignment<'src> {
                 format!("`{}` redefined here", from.name()),
                 from.span_name(),
             );
-            return Err(error);
+            state.errors.push(error);
+            return None;
         }
 
         // Inline variable alias
         if let parse::ExpressionInner::Variable(parent) = from.expression().inner() {
             state.define_variable_alias(from.name(), parent, from.span_total());
-            return Ok(Self {
+            return Some(Self {
                 name: from.name(),
                 expression: None,
             });
@@ -910,9 +931,11 @@ impl<'src> Assignment<'src> {
                 };
             }
 
-            return Err(error);
+            state.errors.push(error);
+            return None;
         }
-        Ok(Self {
+
+        Some(Self {
             name: from.name(),
             expression: Some(expr),
         })
@@ -920,7 +943,7 @@ impl<'src> Assignment<'src> {
 }
 
 impl<'src> Expression<'src> {
-    fn analyze(from: &parse::Expression<'src>, state: &mut State<'src>) -> Result<Self, Error> {
+    fn analyze(from: &parse::Expression<'src>, state: &mut State<'src>) -> Option<Self> {
         match from.inner() {
             parse::ExpressionInner::Variable(name) => state
                 .resolve_alias(name)
@@ -929,13 +952,15 @@ impl<'src> Expression<'src> {
                     is_unit: false,
                 })
                 .map_err(|_| {
-                    Error::new(
+                    let error = Error::new(
                         format!("variable `{}` has not been defined", name),
                         from.span(),
                     )
-                    .in_context("cannot find definition", from.span())
-                }),
-            parse::ExpressionInner::Bytes(bytes) => Ok(Self {
+                    .in_context("cannot find definition", from.span());
+                    state.errors.push(error);
+                })
+                .ok(),
+            parse::ExpressionInner::Bytes(bytes) => Some(Self {
                 inner: ExpressionInner::Bytes(bytes.shallow_clone()),
                 is_unit: false,
             }),
@@ -948,28 +973,32 @@ impl<'src> Expression<'src> {
 }
 
 impl<'src> Call<'src> {
-    fn analyze(from: &parse::Call<'src>, state: &mut State<'src>) -> Result<Self, Error> {
+    fn analyze(from: &parse::Call<'src>, state: &mut State<'src>) -> Option<Self> {
         // Get the name and the return type of the called function
         let name = match from.name() {
             parse::CallName::Builtin(name) => match Operation::from_str(name) {
                 Ok(opcode) => CallName::Builtin(opcode),
                 Err(_) => {
-                    return Err(
-                        Error::new("unexpected operation", from.span_name()).in_context(
-                            format!("`{}` is not in the list of known operations", from.name()),
-                            from.span_name(),
-                        ),
+                    let error = Error::new("unexpected operation", from.span_name()).in_context(
+                        format!("`{}` is not in the list of known operations", from.name()),
+                        from.span_name(),
                     );
+                    state.errors.push(error);
+
+                    return None;
                 }
             },
             parse::CallName::Custom(name) => match state.function_declaration.get(name) {
                 Some(function) => CallName::Custom(function.shallow_clone()),
                 None => {
-                    return Err(Error::new(
+                    let error = Error::new(
                         format!("function `{}` has not been defined", name),
                         from.span_name(),
                     )
-                    .in_context("cannot find definition", from.span_name()));
+                    .in_context("cannot find definition", from.span_name());
+                    state.errors.push(error);
+
+                    return None;
                 }
             },
         };
@@ -1020,24 +1049,28 @@ impl<'src> Call<'src> {
                     );
                 }
             }
-            return Err(error);
+
+            state.errors.push(error);
+            return None;
         }
 
         // Check that all arguments have been defined
         debug_assert_eq!(from.args().len(), from.span_args().len());
         let args: Arc<[VariableName]> = (0..from.args().len())
             .map(|i| match state.resolve_alias(from.args()[i]) {
-                Ok(resolved) => Ok(resolved),
+                Ok(resolved) => Some(resolved),
                 Err(_) => {
                     let error = Error::new(
                         format!("variable `{}` has not been defined", from.args()[i]),
                         from.span_args()[i],
                     )
                     .in_context("cannot find definition", from.span_args()[i]);
-                    Err(error)
+                    state.errors.push(error);
+
+                    None
                 }
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Option<_>>()?;
 
         // Check that no argument appears twice (counterintuitive limitation of current compiler)
         let mut arg_definition: HashMap<VariableName, SimpleSpan> = HashMap::new();
@@ -1059,15 +1092,16 @@ impl<'src> Call<'src> {
                         error.in_context2(format!("`{}` is aliased to `{}`", name, parent), *span);
                     name = parent;
                 }
+                error =
+                    error.with_note("unique arguments are a limitation of the current compiler");
+                state.errors.push(error);
 
-                return Err(
-                    error.with_note("unique arguments are a limitation of the current compiler")
-                );
+                return None;
             }
 
             arg_definition.insert(args[i], from.span_args()[i]);
         }
 
-        Ok(Self { name, args })
+        Some(Self { name, args })
     }
 }

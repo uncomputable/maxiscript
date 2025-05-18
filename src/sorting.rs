@@ -278,7 +278,7 @@ mod tests {
     ) {
         for x in less_than.keys().chain(less_than.values().flatten()) {
             assert!(
-                sorted.contains(&x),
+                sorted.contains(x),
                 "sorted slice should contain `{x:?}`, but it doesn't: `{sorted:?}`"
             )
         }
