@@ -129,7 +129,7 @@ impl ShallowClone for Declaration<'_> {
 pub struct Function<'src> {
     declaration: Declaration<'src>,
     body: Arc<[Statement<'src>]>,
-    final_expr: Option<Arc<Expression<'src>>>,
+    return_expr: Option<Arc<Expression<'src>>>,
 }
 
 impl<'src> Function<'src> {
@@ -148,9 +148,9 @@ impl<'src> Function<'src> {
         &self.body
     }
 
-    /// Accesses the optional final expression in the function body, which produces the return value.
-    pub fn final_expr(&self) -> Option<&Expression<'src>> {
-        self.final_expr.as_ref().map(Arc::as_ref)
+    /// Accesses the optional return expression in the function body.
+    pub fn return_expr(&self) -> Option<&Expression<'src>> {
+        self.return_expr.as_ref().map(Arc::as_ref)
     }
 
     /// Returns the number of arguments that this function takes as input.
@@ -169,7 +169,7 @@ impl ShallowClone for Function<'_> {
         Self {
             declaration: self.declaration.shallow_clone(),
             body: self.body.shallow_clone(),
-            final_expr: self.final_expr.shallow_clone(),
+            return_expr: self.return_expr.shallow_clone(),
         }
     }
 }
@@ -721,18 +721,18 @@ impl<'src> Function<'src> {
             .map(|stmt| Statement::analyze(stmt, state))
             .collect::<Option<_>>()?;
         let body: Arc<[Statement]> = body.into_iter().flatten().collect();
-        let final_expr = match from.final_expr() {
+        let return_expr = match from.return_expr() {
             Some(expr) => Some(Expression::analyze(expr, state).map(Arc::new)?),
             None => None,
         };
 
         // Type-check function body
-        let body_is_unit = match &final_expr {
+        let body_is_unit = match &return_expr {
             Some(expr) => expr.is_unit(),
             None => true,
         };
         let body_return_span = from
-            .final_expr()
+            .return_expr()
             .map(|expr| expr.span())
             .unwrap_or_else(|| {
                 from.body()
@@ -772,7 +772,7 @@ impl<'src> Function<'src> {
         let function = Function {
             declaration,
             body,
-            final_expr,
+            return_expr,
         };
 
         Some(function)
