@@ -124,6 +124,7 @@ impl ShallowClone for Program<'_> {
     }
 }
 
+/// The name of a (custom) function.
 pub type FunctionName<'src> = &'src str;
 
 // TODO: Allow block expressions and scopes

@@ -685,7 +685,26 @@ impl<'src> Declaration<'src> {
 }
 
 // TODO: Detect unused parameters
-// Warn user and effectively remove parameter from function signature
+// TODO: Handle cascading unused-ness properly
+// TODO: 1) Stratify program 2) Remove unused variables per stratum
+// Functions from stratum i + 1 call functions from stratum i, which will be ready at this point
+// -> Maybe no more need for declarations
+//
+// Filter out unused parameters
+//
+// Removing an unused parameter can have cascading effects on calls to that function.
+// Variables used as argument for the removed parameter will no longer be used as argument,
+// which makes them a potentially unused variable.
+//
+// fn f(x, y) -> _ { let z = 0x01; op::equal_verify(x, z) } // y is unused
+// fn main() { let x = 0x01; let y = 0x02; f(x, y) } // y is implicitly unused
+//
+// fn (x, y, z) { g(x, y) }
+// fn g(x, y) { h(x) }
+// fn h(x) { }
+//
+// Warning about implicitly unused variables would be confusing to the programmer.
+// However, these variables must be removed from the IR to ensure correct compilation.
 impl<'src> Function<'src> {
     fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Option<Self> {
         let declaration = state
@@ -765,7 +784,7 @@ impl<'src> Statement<'src> {
     ///
     /// - `Some(Some(x))` if the statement was successfully constructed.
     /// - `Some(None)` if the statement was inlined. The `state` implicitly carries this information.
-    /// - `None` if there was an error in the parse tree.
+    /// - `None` if there was an error in the parse tree. The `state` implicitly carries the error.
     fn analyze(from: &parse::Statement<'src>, state: &mut State<'src>) -> Option<Option<Self>> {
         match from {
             parse::Statement::Assignment(ass) => {
@@ -807,7 +826,7 @@ impl<'src> Assignment<'src> {
     ///
     /// - `Some(Some(x))` if the assignment was successfully constructed.
     /// - `Some(None)` if the assignment was inlined. The `state` implicitly carries this information.
-    /// - `None` if there was an error in the parse tree.
+    /// - `None` if there was an error in the parse tree. The `state` implicitly carries the error.
     fn analyze(from: &parse::Assignment<'src>, state: &mut State<'src>) -> Option<Option<Self>> {
         if let Err(previous_span) = state.define_variable(from.name(), from.span_name()) {
             let error = Diagnostic::error(
