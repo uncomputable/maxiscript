@@ -700,15 +700,6 @@ impl<'src> Function<'src> {
             Some(expr) => expr.is_unit(),
             None => true,
         };
-        let body_return_span = from
-            .return_expr()
-            .map(|expr| expr.span())
-            .unwrap_or_else(|| {
-                from.body()
-                    .last()
-                    .map(|stmt| stmt.span())
-                    .unwrap_or_else(|| from.span_body())
-            });
         if from.is_unit() && !body_is_unit {
             let error = Diagnostic::error("mismatched types", from.span_total())
                 .in_context(
@@ -717,7 +708,7 @@ impl<'src> Function<'src> {
                 )
                 .in_context(
                     format!("the last line of `{}` returns a value", from.name()),
-                    body_return_span,
+                    from.span_return_expr(),
                 );
             state.errors.push(error);
             return None;
@@ -730,7 +721,7 @@ impl<'src> Function<'src> {
                 )
                 .in_context(
                     format!("the last line of `{}` returns nothing", from.name()),
-                    body_return_span,
+                    from.span_return_expr(),
                 );
             state.errors.push(error);
             return None;

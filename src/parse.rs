@@ -207,6 +207,19 @@ impl<'src> Function<'src> {
     pub fn span_body(&self) -> SimpleSpan {
         self.span_body
     }
+
+    /// Accesses the span of the final expression that produces the return value.
+    /// If it doesn't exist, then this method uses the final statement instead.
+    pub fn span_return_expr(&self) -> SimpleSpan {
+        self.return_expr()
+            .map(|expr| expr.span())
+            .unwrap_or_else(|| {
+                self.body()
+                    .last()
+                    .map(|stmt| stmt.span())
+                    .unwrap_or_else(|| self.span_body())
+            })
+    }
 }
 
 impl fmt::Display for Function<'_> {
