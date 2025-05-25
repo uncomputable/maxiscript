@@ -22,7 +22,7 @@ impl<'src> Program<'src> {
     ///
     /// ## Topological order
     ///
-    /// If function `g` calls function `f`, then `f` appears before `g`.
+    /// If function `f` is called by function `g`, then `f` appears before `g`.
     /// The first functions that appear don't call anything.
     /// The last function that will appear is the `main` function.
     ///
@@ -40,10 +40,9 @@ impl<'src> Program<'src> {
 
     /// Accesses the main function of the program.
     pub fn main_function(&self) -> &Function {
-        self.items
-            .iter()
-            .find(|function| function.name() == "main")
-            .expect("main function should exist")
+        let ret = self.items().last().expect("main function should exist");
+        debug_assert_eq!(ret.name(), "main");
+        ret
     }
 }
 
@@ -55,21 +54,20 @@ impl ShallowClone for Program<'_> {
     }
 }
 
-/// Declaration of a function.
-///
-/// This is basically a function without its body.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Declaration<'src> {
+pub struct Function<'src> {
     name: FunctionName<'src>,
     params: Arc<[VariableName<'src>]>,
     is_unit: bool,
+    body: Arc<[Statement<'src>]>,
+    return_expr: Option<Arc<Expression<'src>>>,
     span_name: SimpleSpan,
     span_params: Arc<[SimpleSpan]>,
     span_params_total: SimpleSpan,
     span_return: SimpleSpan,
 }
 
-impl<'src> Declaration<'src> {
+impl<'src> Function<'src> {
     /// Accesses the name of the function.
     pub fn name(&self) -> FunctionName<'src> {
         self.name
@@ -88,6 +86,16 @@ impl<'src> Declaration<'src> {
     /// Returns `true` if the function returns no values.
     pub fn is_unit(&self) -> bool {
         self.is_unit
+    }
+
+    /// Accesses the statements of the function body.
+    pub fn body(&self) -> &[Statement<'src>] {
+        &self.body
+    }
+
+    /// Accesses the optional return expression in the function body.
+    pub fn return_expr(&self) -> Option<&Expression<'src>> {
+        self.return_expr.as_ref().map(Arc::as_ref)
     }
 
     /// Accesses the span of the name of the function.
@@ -111,65 +119,18 @@ impl<'src> Declaration<'src> {
     }
 }
 
-impl ShallowClone for Declaration<'_> {
+impl ShallowClone for Function<'_> {
     fn shallow_clone(&self) -> Self {
         Self {
             name: self.name,
             params: self.params.shallow_clone(),
             is_unit: self.is_unit,
+            body: self.body.shallow_clone(),
+            return_expr: self.return_expr.shallow_clone(),
             span_name: self.span_name,
             span_params: self.span_params.shallow_clone(),
             span_params_total: self.span_params_total,
             span_return: self.span_return,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Function<'src> {
-    declaration: Declaration<'src>,
-    body: Arc<[Statement<'src>]>,
-    return_expr: Option<Arc<Expression<'src>>>,
-}
-
-impl<'src> Function<'src> {
-    /// Accesses the name of the function.
-    pub fn name(&self) -> FunctionName<'src> {
-        self.declaration.name()
-    }
-
-    /// Accesses the parameters of the function.
-    pub fn params(&self) -> &[VariableName<'src>] {
-        self.declaration.params()
-    }
-
-    /// Accesses the statements of the function body.
-    pub fn body(&self) -> &[Statement<'src>] {
-        &self.body
-    }
-
-    /// Accesses the optional return expression in the function body.
-    pub fn return_expr(&self) -> Option<&Expression<'src>> {
-        self.return_expr.as_ref().map(Arc::as_ref)
-    }
-
-    /// Returns the number of arguments that this function takes as input.
-    pub fn n_args(&self) -> usize {
-        self.declaration.n_args()
-    }
-
-    /// Returns `true` if the function returns no values.
-    pub fn is_unit(&self) -> bool {
-        self.declaration.is_unit
-    }
-}
-
-impl ShallowClone for Function<'_> {
-    fn shallow_clone(&self) -> Self {
-        Self {
-            declaration: self.declaration.shallow_clone(),
-            body: self.body.shallow_clone(),
-            return_expr: self.return_expr.shallow_clone(),
         }
     }
 }
@@ -268,7 +229,7 @@ impl ShallowClone for ExpressionInner<'_> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CallName<'src> {
     Builtin(Operation),
-    Custom(Declaration<'src>),
+    Custom(Function<'src>),
 }
 
 impl<'src> CallName<'src> {
@@ -341,15 +302,10 @@ impl ShallowClone for Call<'_> {
 
 #[derive(Debug, Clone, Default)]
 struct State<'src> {
-    /// Maps function names to their function declaration.
+    /// Maps function names to where they were first defined.
     ///
-    /// The IR is constructed in two phases:
-    ///
-    /// 1) The declarations of all functions are collected.
-    /// 2) The body of each function is analyzed, with reference to function declarations.
-    ///
-    /// The two-phase designs allows functions to be used before they are defined.
-    function_declaration: HashMap<FunctionName<'src>, Declaration<'src>>,
+    /// There is an error if the same function is defined twice.
+    function_definition: HashMap<FunctionName<'src>, SimpleSpan>,
     /// Maps functions to where they call other functions.
     ///
     /// This is used for pretty error messages.
@@ -358,6 +314,8 @@ struct State<'src> {
     /// `g` calls `f`: `fn g() { ... f() ... }`
     /// ```
     call_source: HashMap<FunctionName<'src>, Vec<(FunctionName<'src>, SimpleSpan)>>,
+    /// Maps function names to their IR representation.
+    function_ir: HashMap<FunctionName<'src>, Function<'src>>,
     /// Maps variables to the span where they were first defined.
     ///
     /// There is an error if the same variable is defined twice.
@@ -579,6 +537,17 @@ impl<'src> Program<'src> {
             }
         }
 
+        // Enforce definition of all called functions
+        for (name, span) in state.call_source.values().flat_map(|x| x.iter().copied()) {
+            if !state.function_definition.contains_key(name) {
+                let error =
+                    Diagnostic::error(format!("function `{}` has not been defined", name), span)
+                        .in_context("cannot find definition", span);
+                state.errors.push(error);
+                return (None, state.errors);
+            }
+        }
+
         // Enforce existence of `main`
         if !state.call_source.contains_key("main") {
             let error = Diagnostic::error(
@@ -624,14 +593,6 @@ impl<'src> Program<'src> {
                 .collect()
         };
 
-        // Populate state with all declared functions
-        // TODO: Remove declaration analysis, since we are analyzing in topological order
-        for function in function_order.iter() {
-            if Declaration::analyze(function, &mut state).is_none() {
-                return (None, state.errors);
-            }
-        }
-
         // Construct IR of function bodies
         let items: Arc<[Function]> = match function_order
             .iter()
@@ -649,8 +610,27 @@ impl<'src> Program<'src> {
 
 impl<'src> Function<'src> {
     fn update_call_graph(from: &parse::Function<'src>, state: &mut State<'src>) -> Option<()> {
-        let caller = from.name();
+        if let Some(already_defined) = state.function_definition.get(from.name()).copied() {
+            let error = Diagnostic::error(
+                format!("function `{}` is defined multiple times", from.name()),
+                from.span_name(),
+            )
+            .in_context(
+                format!("first definition of `{}`", from.name()),
+                already_defined,
+            )
+            .in_context(
+                format!("`{}` redefined here", from.name()),
+                from.span_name(),
+            );
+            state.errors.push(error);
+            return None;
+        }
+        state
+            .function_definition
+            .insert(from.name(), from.span_name());
 
+        let caller = from.name();
         for expr in from.expressions() {
             if let parse::ExpressionInner::Call(call) = expr.inner() {
                 if let parse::CallName::Custom(called) = call.name() {
@@ -663,51 +643,6 @@ impl<'src> Function<'src> {
                 }
             }
         }
-
-        Some(())
-    }
-}
-
-impl<'src> Declaration<'src> {
-    fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Option<()> {
-        if let Some(already_defined) = state.function_declaration.get(from.name()) {
-            let error = Diagnostic::error(
-                format!("function `{}` is defined multiple times", from.name()),
-                from.span_name(),
-            )
-            .in_context(
-                format!("first definition of `{}`", from.name()),
-                already_defined.span_name,
-            )
-            .in_context(
-                format!("`{}` redefined here", from.name()),
-                from.span_name(),
-            );
-            state.errors.push(error);
-            return None;
-        }
-        if !from.is_unit() && from.name() == "main" {
-            let error = Diagnostic::error("mismatched types", from.span_total())
-                .in_context(
-                    "function `main` is declared to return a value",
-                    from.span_return(),
-                )
-                .with_note("the `main` function can never return a value");
-            state.errors.push(error);
-            return None;
-        }
-
-        let function = Declaration {
-            name: from.name(),
-            params: from.params().shallow_clone(),
-            is_unit: from.is_unit(),
-            span_name: from.span_name(),
-            span_params: from.span_params().shallow_clone(),
-            span_params_total: from.span_params_total(),
-            span_return: from.span_return(),
-        };
-        debug_assert!(!state.function_declaration.contains_key(from.name()));
-        state.function_declaration.insert(from.name(), function);
 
         Some(())
     }
@@ -736,13 +671,18 @@ impl<'src> Declaration<'src> {
 // However, these variables must be removed from the IR to ensure correct compilation.
 impl<'src> Function<'src> {
     fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Option<Self> {
-        let declaration = state
-            .function_declaration
-            .get(from.name())
-            .expect("all function should be declared at this point")
-            .shallow_clone();
-
         state.enter_function(from)?;
+
+        if !from.is_unit() && from.name() == "main" {
+            let error = Diagnostic::error("mismatched types", from.span_total())
+                .in_context(
+                    "function `main` is declared to return a value",
+                    from.span_return(),
+                )
+                .with_note("the `main` function can never return a value");
+            state.errors.push(error);
+            return None;
+        }
 
         let body: Vec<Option<Statement>> = from
             .body()
@@ -799,10 +739,23 @@ impl<'src> Function<'src> {
         state.leave_function();
 
         let function = Function {
-            declaration,
+            name: from.name(),
+            params: from.params().shallow_clone(),
+            is_unit: from.is_unit(),
+            span_name: from.span_name(),
+            span_params: from.span_params().shallow_clone(),
+            span_params_total: from.span_params_total(),
+            span_return: from.span_return(),
             body,
             return_expr,
         };
+        debug_assert!(
+            !state.function_ir.contains_key(from.name()),
+            "functions should be topologically sorted"
+        );
+        state
+            .function_ir
+            .insert(from.name(), function.shallow_clone());
 
         Some(function)
     }
@@ -951,19 +904,13 @@ impl<'src> Call<'src> {
                     return None;
                 }
             },
-            parse::CallName::Custom(name) => match state.function_declaration.get(name) {
-                Some(function) => CallName::Custom(function.shallow_clone()),
-                None => {
-                    let error = Diagnostic::error(
-                        format!("function `{}` has not been defined", name),
-                        from.span_name(),
-                    )
-                    .in_context("cannot find definition", from.span_name());
-                    state.errors.push(error);
-
-                    return None;
-                }
-            },
+            parse::CallName::Custom(name) => {
+                let function = state
+                    .function_ir
+                    .get(name)
+                    .expect("all functions should be defined at this point");
+                CallName::Custom(function.shallow_clone())
+            }
         };
 
         // Check that actual number of arguments matches declared number of parameters
