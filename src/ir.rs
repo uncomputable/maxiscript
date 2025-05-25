@@ -341,10 +341,6 @@ impl ShallowClone for Call<'_> {
 
 #[derive(Debug, Clone, Default)]
 struct State<'src> {
-    /// The name of the current function.
-    ///
-    /// This value is `None` when the state is operating outside a function body.
-    current_function: Option<FunctionName<'src>>,
     /// Maps function names to their function declaration.
     ///
     /// The IR is constructed in two phases:
@@ -394,14 +390,11 @@ impl<'src> State<'src> {
     pub fn enter_function(&mut self, f: &parse::Function<'src>) -> Option<()> {
         debug_assert_eq!(f.params().len(), f.params().len());
         debug_assert!(
-            self.current_function.is_none()
-                && self.variable_definition.is_empty()
+            self.variable_definition.is_empty()
                 && self.alias_resolver.is_empty()
                 && self.alias_source.is_empty(),
             "did you forget to leave the previous function?"
         );
-
-        self.current_function = Some(f.name());
 
         for i in 0..f.params().len() {
             if let Err(previous_span) = self.define_variable(f.params()[i], f.span_params()[i]) {
@@ -427,7 +420,6 @@ impl<'src> State<'src> {
 
     /// Leaves the scope of the current function body.
     pub fn leave_function(&mut self) {
-        self.current_function = None;
         self.variable_definition.clear();
         self.alias_resolver.clear();
         self.alias_source.clear();
@@ -499,6 +491,7 @@ impl<'src> State<'src> {
     /// This method panics if the state is currently outside a function body.
     pub fn check_recursive_call(
         &mut self,
+        caller: FunctionName<'src>,
         called: FunctionName<'src>,
         call_span: SimpleSpan,
     ) -> Option<()> {
@@ -509,12 +502,11 @@ impl<'src> State<'src> {
         }
 
         fn create_error<'src>(
-            current: FunctionName<'src>,
+            mut caller: FunctionName<'src>,
             path: Vec<(FunctionName<'src>, SimpleSpan)>,
         ) -> Diagnostic {
             debug_assert!(!path.is_empty());
             let mut error = Diagnostic::error("recursive call detected", path[0].1);
-            let mut caller = current;
 
             for (called, span) in path {
                 error = error.in_context(format!("`{}` calls `{}`", caller, called), span);
@@ -527,9 +519,7 @@ impl<'src> State<'src> {
             )
         }
 
-        let origin = self
-            .current_function
-            .expect("should be inside function body");
+        let origin = caller;
         let mut stack = vec![Task::Explore((called, call_span))];
         let mut path = vec![];
 
@@ -581,14 +571,16 @@ impl<'src> Program<'src> {
     pub fn analyze(from: &parse::Program<'src>) -> (Option<Self>, Vec<Diagnostic>) {
         let mut state = State::default();
 
-        // Step 1: Populate state with all declared functions
+        // Build call graph
+        // Enforce stratified program
         for function in from.items() {
-            if Declaration::analyze(function, &mut state).is_none() {
+            if Function::update_call_graph(function, &mut state).is_none() {
                 return (None, state.errors);
             }
         }
 
-        if !state.function_declaration.contains_key("main") {
+        // Enforce existence of `main`
+        if !state.call_source.contains_key("main") {
             let error = Diagnostic::error(
                 "the `main` function is missing from the program",
                 from.span(),
@@ -598,44 +590,81 @@ impl<'src> Program<'src> {
             return (None, state.errors);
         }
 
-        // Step 2: Construct IR of function bodies
-        let mut items: HashMap<FunctionName, Function> = match from
+        // Filter out unused functions
+        let used_functions: HashSet<FunctionName> = state.called_by_main();
+        for f in from
             .items()
             .iter()
-            .map(|f| Function::analyze(f, &mut state).map(|f| (f.name(), f)))
+            .filter(|f| !used_functions.contains(f.name()))
+        {
+            let span = f.span_name();
+            let error = Diagnostic::warning("function is never used", span)
+                .in_context2(format!("`{}` is never called", f.name()), span);
+            state.errors.push(error);
+        }
+
+        // Topologically sort (used) functions
+        // TODO: Split `State` to allow extraction of `call_source`?
+        let call_relation: HashMap<FunctionName, HashSet<FunctionName>> =
+            std::mem::take(&mut state.call_source)
+                .into_iter()
+                .filter(|(name, _)| used_functions.contains(name))
+                .map(|(name, called)| (name, called.into_iter().map(|x| x.0).collect()))
+                .collect();
+        let function_order: Vec<&parse::Function> = {
+            let rev_function_order = sorting::topological_sort(&call_relation);
+            debug_assert_eq!(rev_function_order.len(), used_functions.len());
+            debug_assert_eq!(rev_function_order.iter().duplicates().next(), None);
+            let mut functions: HashMap<FunctionName, &parse::Function> =
+                from.items().iter().map(|f| (f.name(), f)).collect();
+            rev_function_order
+                .into_iter()
+                .rev()
+                .map(|name| functions.remove(name).unwrap())
+                .collect()
+        };
+
+        // Populate state with all declared functions
+        // TODO: Remove declaration analysis, since we are analyzing in topological order
+        for function in function_order.iter() {
+            if Declaration::analyze(function, &mut state).is_none() {
+                return (None, state.errors);
+            }
+        }
+
+        // Construct IR of function bodies
+        let items: Arc<[Function]> = match function_order
+            .iter()
+            .map(|f| Function::analyze(f, &mut state))
             .collect::<Option<_>>()
         {
             Some(items) => items,
             None => return (None, state.errors),
         };
 
-        // Step 3: Filter out unused functions
-        let used_functions = state.called_by_main();
-
-        for name in items.keys().filter(|&name| !used_functions.contains(name)) {
-            let span = items[name].declaration.span_name;
-            let error = Diagnostic::warning("function is never used", span)
-                .in_context2(format!("`{name}` is never called"), span);
-            state.errors.push(error);
-        }
-
-        // Step 4: Topologically sort functions that are called by main
-        let call_relation: HashMap<FunctionName, HashSet<FunctionName>> = state
-            .call_source
-            .into_iter()
-            .filter(|(name, _)| used_functions.contains(name))
-            .map(|(name, called)| (name, called.into_iter().map(|x| x.0).collect()))
-            .collect();
-        let rev_sorted = sorting::topological_sort(&call_relation);
-        debug_assert_eq!(rev_sorted.iter().duplicates().next(), None);
-        let items: Arc<[Function]> = rev_sorted
-            .into_iter()
-            .rev()
-            .map(|name| items.remove(name).expect("function should be analyzed"))
-            .collect();
-
         let program = Self { items };
         (Some(program), state.errors)
+    }
+}
+
+impl<'src> Function<'src> {
+    fn update_call_graph(from: &parse::Function<'src>, state: &mut State<'src>) -> Option<()> {
+        let caller = from.name();
+
+        for expr in from.expressions() {
+            if let parse::ExpressionInner::Call(call) = expr.inner() {
+                if let parse::CallName::Custom(called) = call.name() {
+                    state
+                        .call_source
+                        .entry(caller)
+                        .or_default()
+                        .push((called, call.span_total()));
+                    state.check_recursive_call(caller, called, call.span_total())?;
+                }
+            }
+        }
+
+        Some(())
     }
 }
 
@@ -936,20 +965,6 @@ impl<'src> Call<'src> {
                 }
             },
         };
-
-        // Update call graph and check for recursive calls
-        if let CallName::Custom(function) = &name {
-            let caller = state
-                .current_function
-                .expect("should be inside function body");
-            let called = function.name();
-            state
-                .call_source
-                .entry(caller)
-                .or_default()
-                .push((called, from.span_total()));
-            state.check_recursive_call(called, from.span_total())?;
-        }
 
         // Check that actual number of arguments matches declared number of parameters
         if from.args().len() != name.n_args() {

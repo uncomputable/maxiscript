@@ -160,6 +160,14 @@ impl<'src> Function<'src> {
         &self.body
     }
 
+    /// Returns an iterator over all expressions in the function body.
+    pub fn expressions(&self) -> impl Iterator<Item = &Expression<'src>> {
+        self.body()
+            .iter()
+            .map(Statement::expression)
+            .chain(self.return_expr())
+    }
+
     /// Accesses the optional return expression in the function body.
     pub fn return_expr(&self) -> Option<&Expression<'src>> {
         self.return_expr.as_ref().map(Arc::as_ref)
@@ -252,13 +260,20 @@ pub enum Statement<'src> {
     UnitExpr(Expression<'src>),
 }
 
-#[allow(clippy::needless_lifetimes)]
 impl<'src> Statement<'src> {
     /// Accesses the span of the statement.
     pub fn span(&self) -> SimpleSpan {
         match self {
             Self::Assignment(ass) => ass.span_total(),
             Self::UnitExpr(expr) => expr.span(),
+        }
+    }
+
+    /// Accesses the expression of the statement.
+    pub fn expression(&self) -> &Expression<'src> {
+        match self {
+            Self::Assignment(ass) => ass.expression(),
+            Self::UnitExpr(expr) => expr,
         }
     }
 }
