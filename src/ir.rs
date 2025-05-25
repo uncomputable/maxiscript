@@ -549,7 +549,7 @@ impl<'src> Program<'src> {
         }
 
         // Enforce existence of `main`
-        if !state.call_source.contains_key("main") {
+        if !state.function_definition.contains_key("main") {
             let error = Diagnostic::error(
                 "the `main` function is missing from the program",
                 from.span(),
@@ -558,6 +558,7 @@ impl<'src> Program<'src> {
             state.errors.push(error);
             return (None, state.errors);
         }
+        state.call_source.entry("main").or_default();
 
         // Filter out unused functions
         let used_functions: HashSet<FunctionName> = state.called_by_main();
@@ -574,6 +575,7 @@ impl<'src> Program<'src> {
 
         // Topologically sort (used) functions
         // TODO: Split `State` to allow extraction of `call_source`?
+        debug_assert!(state.call_source.contains_key("main"));
         let call_relation: HashMap<FunctionName, HashSet<FunctionName>> =
             std::mem::take(&mut state.call_source)
                 .into_iter()
@@ -582,8 +584,16 @@ impl<'src> Program<'src> {
                 .collect();
         let function_order: Vec<&parse::Function> = {
             let rev_function_order = sorting::topological_sort(&call_relation);
-            debug_assert_eq!(rev_function_order.len(), used_functions.len());
-            debug_assert_eq!(rev_function_order.iter().duplicates().next(), None);
+            debug_assert_eq!(
+                rev_function_order.len(),
+                used_functions.len(),
+                "function order should contain all used functions"
+            );
+            debug_assert_eq!(
+                rev_function_order.iter().duplicates().next(),
+                None,
+                "function order should not contain duplicates"
+            );
             let mut functions: HashMap<FunctionName, &parse::Function> =
                 from.items().iter().map(|f| (f.name(), f)).collect();
             rev_function_order
