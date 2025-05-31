@@ -43,7 +43,6 @@ impl AsRef<PushBytes> for Position {
 #[derive(Debug, Clone, Default)]
 struct Stack<'src> {
     variables: Vec<VariableName<'src>>,
-    // function_body: HashMap<FunctionName<'src>, bitcoin::ScriptBuf>,
 }
 
 impl<'src> Stack<'src> {
@@ -108,6 +107,7 @@ impl<'src> Stack<'src> {
     }
 }
 
+// TODO: Move into IR?
 struct Dependencies<'a, 'src> {
     depends_on: HashMap<&'a Statement<'src>, Vec<&'a Statement<'src>>>,
     uses_variables: HashMap<&'a Statement<'src>, Vec<VariableName<'src>>>,
@@ -115,16 +115,15 @@ struct Dependencies<'a, 'src> {
 
 /// Function arguments are assumed to be already on the stack.
 /// Therefore, function parameters don't count towards inter-statement dependencies.
-fn get_statement_dependencies<'src, 'a: 'src>(function: &'a Function) -> Dependencies<'a, 'src> {
-    let params: HashSet<VariableName> = function.params().iter().copied().collect();
+fn get_statement_dependencies<'src, 'a: 'src>(f: &'a Function) -> Dependencies<'a, 'src> {
+    let params: HashSet<VariableName> = f.params().iter().copied().collect();
     let mut defined_in: HashMap<VariableName, &Statement> = HashMap::new();
     let mut depends_on: HashMap<&Statement, Vec<&Statement>> =
-        HashMap::with_capacity(function.body().len());
-    let mut depended_on: HashSet<&Statement> = HashSet::new();
+        HashMap::with_capacity(f.body().len());
     let mut uses_variables: HashMap<&Statement, Vec<VariableName>> =
-        HashMap::with_capacity(function.body().len());
+        HashMap::with_capacity(f.body().len());
 
-    for statement in function.body().iter() {
+    for statement in f.body().iter() {
         let expr = match statement {
             Statement::Assignment(ass) => {
                 defined_in.insert(ass.name(), statement);
@@ -136,7 +135,6 @@ fn get_statement_dependencies<'src, 'a: 'src>(function: &'a Function) -> Depende
             ExpressionInner::Variable(name) if !params.contains(name) => {
                 let &defining_statement = defined_in.get(name).expect("variable should be defined");
                 depends_on.insert(statement, vec![defining_statement]);
-                depended_on.insert(defining_statement);
                 uses_variables.insert(statement, vec![name]);
             }
             ExpressionInner::Call(call) => {
@@ -146,7 +144,6 @@ fn get_statement_dependencies<'src, 'a: 'src>(function: &'a Function) -> Depende
                     .filter(|&name| !params.contains(name))
                     .map(|name| *defined_in.get(name).expect("variable should be defined"))
                     .collect();
-                depended_on.extend(stmts.iter().copied());
                 depends_on.insert(statement, stmts);
                 uses_variables.insert(statement, call.args().to_vec());
             }
@@ -155,16 +152,6 @@ fn get_statement_dependencies<'src, 'a: 'src>(function: &'a Function) -> Depende
             }
         }
     }
-
-    let useful_statement = |stmt: &Statement| match stmt {
-        // Assignments are useful if their defined variable is used
-        Statement::Assignment(_) => depended_on.contains(stmt),
-        // Unit expressions are always useful (e.g., for witness verification)
-        Statement::UnitExpr(_) => true,
-    };
-
-    depends_on.retain(|stmt, _| useful_statement(stmt));
-    uses_variables.retain(|stmt, _| useful_statement(stmt));
 
     Dependencies {
         depends_on,
@@ -186,7 +173,6 @@ pub fn compile(program: &Program) -> bitcoin::ScriptBuf {
         .expect("main function should be compiled")
 }
 
-// TODO: Drop values (parameters) that are not consumed (ensure hygiene)
 pub fn compile_function_body<'src>(
     function: &Function<'src>,
     compiled_bodies: &HashMap<FunctionName<'src>, bitcoin::ScriptBuf>,
