@@ -1,6 +1,7 @@
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::ops::Not;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -58,6 +59,8 @@ impl ShallowClone for Program<'_> {
 pub struct Function<'src> {
     name: FunctionName<'src>,
     params: Arc<[VariableName<'src>]>,
+    params_source: Arc<[VariableName<'src>]>,
+    unused_params: Arc<BTreeSet<usize>>,
     is_unit: bool,
     body: Arc<[Statement<'src>]>,
     return_expr: Option<Arc<Expression<'src>>>,
@@ -73,14 +76,34 @@ impl<'src> Function<'src> {
         self.name
     }
 
-    /// Accesses the parameters of the function.
+    /// Accesses the (used) parameters of the function.
     pub fn params(&self) -> &[VariableName<'src>] {
         &self.params
     }
 
-    /// Returns the number of arguments that this function takes as input.
+    /// Returns the number of (used) arguments that this function takes as input.
     pub fn n_args(&self) -> usize {
         self.params.len()
+    }
+
+    /// Accesses the parameters of the function, according to the source code.
+    ///
+    /// This list may contain _unused_ parameters.
+    pub fn params_source(&self) -> &[VariableName<'src>] {
+        &self.params_source
+    }
+
+    /// Returns the number of arguments that this function takes as input,
+    /// according to the source code.
+    ///
+    /// This number may include _unused_ arguments.
+    pub fn n_source_args(&self) -> usize {
+        self.params_source.len()
+    }
+
+    /// Accesses the indices of unused parameters of the function.
+    pub fn unused_params(&self) -> &BTreeSet<usize> {
+        &self.unused_params
     }
 
     /// Returns `true` if the function returns no values.
@@ -124,6 +147,8 @@ impl ShallowClone for Function<'_> {
         Self {
             name: self.name,
             params: self.params.shallow_clone(),
+            params_source: self.params_source.shallow_clone(),
+            unused_params: self.unused_params.shallow_clone(),
             is_unit: self.is_unit,
             body: self.body.shallow_clone(),
             return_expr: self.return_expr.shallow_clone(),
@@ -143,6 +168,24 @@ pub enum Statement<'src> {
     UnitExpr(Expression<'src>),
 }
 
+impl<'src> Statement<'src> {
+    /// Converts the type into an [`Assignment`], if possible.
+    pub fn as_assignment(&self) -> Option<&Assignment<'src>> {
+        match self {
+            Self::Assignment(ass) => Some(ass),
+            _ => None,
+        }
+    }
+
+    /// Accesses the expression contained in the statement.
+    pub fn expression(&self) -> &Expression<'src> {
+        match self {
+            Self::Assignment(ass) => ass.expression(),
+            Self::UnitExpr(expr) => expr,
+        }
+    }
+}
+
 impl ShallowClone for Statement<'_> {
     fn shallow_clone(&self) -> Self {
         match self {
@@ -156,6 +199,7 @@ impl ShallowClone for Statement<'_> {
 pub struct Assignment<'src> {
     name: VariableName<'src>,
     expression: Expression<'src>,
+    span_name: SimpleSpan,
 }
 
 impl<'src> Assignment<'src> {
@@ -168,6 +212,11 @@ impl<'src> Assignment<'src> {
     pub fn expression(&self) -> &Expression<'src> {
         &self.expression
     }
+
+    /// Accesses the span of the variable that is being assigned.
+    pub fn span_name(&self) -> SimpleSpan {
+        self.span_name
+    }
 }
 
 impl ShallowClone for Assignment<'_> {
@@ -175,6 +224,7 @@ impl ShallowClone for Assignment<'_> {
         Self {
             name: self.name,
             expression: self.expression.shallow_clone(),
+            span_name: self.span_name,
         }
     }
 }
@@ -194,6 +244,16 @@ impl<'src> Expression<'src> {
     /// Returns `true` if the expression returns no values.
     pub fn is_unit(&self) -> bool {
         self.is_unit
+    }
+
+    // TODO: Do this without allocation?
+    /// Returns a vector of all used variables of the expression.
+    pub fn used_variables(&self) -> Vec<VariableName<'src>> {
+        match self.inner() {
+            ExpressionInner::Variable(x) => vec![x],
+            ExpressionInner::Call(call) => call.args().to_vec(),
+            ExpressionInner::Bytes(..) => vec![],
+        }
     }
 }
 
@@ -233,11 +293,22 @@ pub enum CallName<'src> {
 }
 
 impl<'src> CallName<'src> {
-    /// Returns the number of arguments that this function takes as input.
+    /// Returns the number of (used) arguments that this function takes as input.
     pub fn n_args(&self) -> usize {
         match self {
             Self::Builtin(operation) => operation.n_args(),
             Self::Custom(function) => function.n_args(),
+        }
+    }
+
+    /// Returns the number of arguments that this function takes as input,
+    /// according to the source code.
+    ///
+    /// This number may include _unused_ arguments.
+    pub fn n_source_args(&self) -> usize {
+        match self {
+            Self::Builtin(operation) => operation.n_args(),
+            Self::Custom(function) => function.n_source_args(),
         }
     }
 
@@ -280,7 +351,7 @@ impl<'src> Call<'src> {
         &self.name
     }
 
-    /// Accesses the arguments of the call.
+    /// Accesses the (used) arguments of the call.
     pub fn args(&self) -> &[VariableName<'src>] {
         &self.args
     }
@@ -658,27 +729,6 @@ impl<'src> Function<'src> {
     }
 }
 
-// TODO: Detect unused parameters
-// TODO: Handle cascading unused-ness properly
-// TODO: 1) Stratify program 2) Remove unused variables per stratum
-// Functions from stratum i + 1 call functions from stratum i, which will be ready at this point
-// -> Maybe no more need for declarations
-//
-// Filter out unused parameters
-//
-// Removing an unused parameter can have cascading effects on calls to that function.
-// Variables used as argument for the removed parameter will no longer be used as argument,
-// which makes them a potentially unused variable.
-//
-// fn f(x, y) -> _ { let z = 0x01; op::equal_verify(x, z) } // y is unused
-// fn main() { let x = 0x01; let y = 0x02; f(x, y) } // y is implicitly unused
-//
-// fn (x, y, z) { g(x, y) }
-// fn g(x, y) { h(x) }
-// fn h(x) { }
-//
-// Warning about implicitly unused variables would be confusing to the programmer.
-// However, these variables must be removed from the IR to ensure correct compilation.
 impl<'src> Function<'src> {
     fn analyze(from: &parse::Function<'src>, state: &mut State<'src>) -> Option<Self> {
         state.enter_function(from)?;
@@ -699,7 +749,7 @@ impl<'src> Function<'src> {
             .iter()
             .map(|stmt| Statement::analyze(stmt, state))
             .collect::<Option<_>>()?;
-        let body: Arc<[Statement]> = body.into_iter().flatten().collect();
+        let body: Vec<Statement> = body.into_iter().flatten().collect();
         let return_expr = match from.return_expr() {
             Some(expr) => Some(Expression::analyze(expr, state).map(Arc::new)?),
             None => None,
@@ -737,18 +787,88 @@ impl<'src> Function<'src> {
             return None;
         }
 
+        let uses_variables: HashMap<&Statement, Vec<VariableName>> = body
+            .iter()
+            .map(|stmt| (stmt, stmt.expression().used_variables()))
+            .collect();
+        let defined_in: HashMap<VariableName, &Statement> = body
+            .iter()
+            .filter_map(|stmt| stmt.as_assignment().map(|ass| (ass.name(), stmt)))
+            .collect();
+
+        // Unit expressions depend on assignments (or on parameters).
+        // Assignments depend on other assignments (or on parameters).
+        // Nothing ever depends on a unit expression.
+        let mut used_variables_new: VecDeque<VariableName> = body
+            .iter()
+            .filter(|stmt| matches!(stmt, Statement::UnitExpr(..)))
+            .filter_map(|stmt| uses_variables.get(stmt))
+            .flat_map(|s| s.iter())
+            .copied()
+            .chain(return_expr.iter().flat_map(|expr| expr.used_variables()))
+            .collect();
+        let mut used_variables: HashSet<VariableName> = HashSet::new();
+        while let Some(x) = used_variables_new.pop_front() {
+            used_variables.insert(x);
+            if let Some(stmt) = defined_in.get(&x) {
+                if let Some(variables) = uses_variables.get(stmt) {
+                    used_variables_new.extend(variables.iter());
+                }
+            }
+        }
+
+        // Filter out unused parameters
+        let mut unused_params = BTreeSet::new();
+        for i in 0..from.params().len() {
+            if used_variables.contains(from.params()[i]) {
+                continue;
+            }
+            let span = from.span_params()[i];
+            let error = Diagnostic::warning("parameter is never used", span)
+                .in_context2(format!("`{}` is never used", from.params()[i]), span);
+            state.errors.push(error);
+            unused_params.insert(i);
+        }
+        let params = from
+            .params()
+            .iter()
+            .copied()
+            .filter(|name| used_variables.contains(name))
+            .collect();
+
+        // Filter out unused statements,
+        // which are always assignments that define unused variables
+        for ass in body.iter().filter_map(|stmt| {
+            stmt.as_assignment()
+                .filter(|ass| !used_variables.contains(ass.name()))
+        }) {
+            let span = ass.span_name();
+            let error = Diagnostic::warning("assigned variable is never used", span)
+                .in_context2(format!("`{}` is never used", ass.name()), span);
+            state.errors.push(error);
+        }
+        let body: Arc<[Statement]> = body
+            .into_iter()
+            .filter(|stmt| match stmt {
+                Statement::UnitExpr(..) => true,
+                Statement::Assignment(ass) => used_variables.contains(ass.name()),
+            })
+            .collect();
+
         state.leave_function();
 
         let function = Function {
             name: from.name(),
-            params: from.params().shallow_clone(),
+            params,
+            params_source: from.params().shallow_clone(),
+            unused_params: Arc::new(unused_params),
             is_unit: from.is_unit(),
+            body,
+            return_expr,
             span_name: from.span_name(),
             span_params: from.span_params().shallow_clone(),
             span_params_total: from.span_params_total(),
             span_return: from.span_return(),
-            body,
-            return_expr,
         };
         debug_assert!(
             !state.function_ir.contains_key(from.name()),
@@ -862,6 +982,7 @@ impl<'src> Assignment<'src> {
         Some(Some(Self {
             name: from.name(),
             expression: expr,
+            span_name: from.span_name(),
         }))
     }
 }
@@ -914,8 +1035,8 @@ impl<'src> Call<'src> {
             }
         };
 
-        // Check that actual number of arguments matches declared number of parameters
-        if from.args().len() != name.n_args() {
+        // Check that given number of arguments matches declared number of parameters
+        if from.args().len() != name.n_source_args() {
             let mut error = Diagnostic::error(
                 format!(
                     "this function takes {} arguments, but {} arguments were supplied",
@@ -953,21 +1074,21 @@ impl<'src> Call<'src> {
 
         // Check that all arguments have been defined
         debug_assert_eq!(from.args().len(), from.span_args().len());
-        let args: Arc<[VariableName]> = (0..from.args().len())
+        let args: Vec<VariableName> = (0..from.args().len())
             .map(|i| state.resolve_alias(from.args()[i], from.span_args()[i]))
             .collect::<Option<_>>()?;
 
         // Check that no argument appears twice (counterintuitive limitation of current compiler)
         let mut arg_definition: HashMap<VariableName, SimpleSpan> = HashMap::new();
-        for i in 0..args.len() {
-            if let Some(&previous_span) = arg_definition.get(args[i]) {
+        for (i, arg) in args.iter().enumerate() {
+            if let Some(&previous_span) = arg_definition.get(arg) {
                 let mut error = Diagnostic::error(
-                    format!("argument `{}` cannot appear twice", args[i]),
+                    format!("argument `{}` cannot appear twice", arg),
                     from.span_args()[i],
                 )
-                .in_context(format!("first appearance of `{}`", args[i]), previous_span)
+                .in_context(format!("first appearance of `{}`", arg), previous_span)
                 .in_context(
-                    format!("duplicate appearance of `{}`", args[i]),
+                    format!("duplicate appearance of `{}`", arg),
                     from.span_args()[i],
                 );
 
@@ -984,8 +1105,25 @@ impl<'src> Call<'src> {
                 return None;
             }
 
-            arg_definition.insert(args[i], from.span_args()[i]);
+            arg_definition.insert(arg, from.span_args()[i]);
         }
+        debug_assert_eq!(args.len(), name.n_source_args());
+
+        // Filter out unused arguments
+        let args: Arc<[VariableName]> = match &name {
+            CallName::Builtin(..) => Arc::from(args),
+            CallName::Custom(function) => args
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, name)| {
+                    function
+                        .unused_params()
+                        .contains(&index)
+                        .not()
+                        .then_some(name)
+                })
+                .collect(),
+        };
 
         Some(Self { name, args })
     }
