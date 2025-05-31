@@ -54,6 +54,7 @@ impl<T: fmt::Display> fmt::Display for StackOp<T> {
 impl<T> StackOp<T> {
     pub const fn cost(&self) -> usize {
         match self {
+            // FIXME: OP_PICK / OP_ROLL cost 1 + 1 + n WU, where N is the number of index bytes!
             Self::Pick(_) | Self::Roll(_) => 2,
             _ => 1,
         }
