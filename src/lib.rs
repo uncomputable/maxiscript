@@ -91,7 +91,18 @@ pub fn parse_program_string(src: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // use bitcoin::consensus::Encodable;
+    // use bitcoin::hashes::Hash;
+    // use bitcoin::transaction::Version;
     use itertools::Itertools;
+
+    // fn serialize<T: Encodable>(value: &T) -> Vec<u8> {
+    //     let mut buffer = Vec::new();
+    //     value
+    //         .consensus_encode(&mut buffer)
+    //         .expect("write to vector should never fail");
+    //     buffer
+    // }
 
     fn assert_ok(source_code: &'static str) {
         let (target_code, diagnostics) = compile_program(source_code);
@@ -100,13 +111,47 @@ mod tests {
                 panic!("Expected no errors, but got: `{e}`");
             }
         }
-        if target_code.is_none() {
-            panic!(
+        let target_code = match target_code {
+            Some(target_code) => target_code,
+            None => panic!(
                 "The compiler failed to produce any target code! Here are all diagnostics: {}",
                 diagnostics.iter().map(|e| format!("`{e}`")).join(", ")
-            );
-        }
-        // TODO: Execute target code
+            ),
+        };
+        println!("Target code: `{target_code}`");
+
+        // let spent_output = bitcoin::TxOut {
+        //     value: bitcoin::Amount::ZERO,
+        //     script_pubkey: bitcoin::ScriptBuf::new(),
+        // };
+        // let amount = bitcoin::Amount::ZERO;
+        // let spending_tx = bitcoin::Transaction {
+        //     version: Version::TWO,
+        //     lock_time: bitcoin::absolute::LockTime::ZERO,
+        //     input: vec![bitcoin::TxIn {
+        //         previous_output: bitcoin::OutPoint {
+        //             txid: bitcoin::Txid::all_zeros(),
+        //             vout: 0,
+        //         },
+        //         script_sig: target_code,
+        //         sequence: bitcoin::Sequence::MAX,
+        //         witness: bitcoin::Witness::new(),
+        //     }],
+        //     output: vec![],
+        // };
+        // let spent_outputs = None;
+        // let input_index = 0;
+        //
+        // FIXME: the trivial script `OP_TRUE` fails to run
+        // if let Err(e) = bitcoinconsensus::verify(
+        //     &serialize(&spent_output),
+        //     amount.to_sat(),
+        //     &serialize(&spending_tx),
+        //     spent_outputs,
+        //     input_index,
+        // ) {
+        //     panic!("Execution error: `{e}`");
+        // }
     }
 
     fn assert_error<Str: ToString>(source_code: &'static str, pattern: Str) {
