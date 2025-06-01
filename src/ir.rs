@@ -262,13 +262,12 @@ impl<'src> Expression<'src> {
         self.is_unit
     }
 
-    // TODO: Do this without allocation?
     /// Returns a vector of all used variables of the expression.
-    pub fn used_variables(&self) -> Vec<VariableName<'src>> {
+    pub fn used_variables(&self) -> Box<dyn Iterator<Item = VariableName<'src>> + '_> {
         match self.inner() {
-            ExpressionInner::Variable(x) => vec![x],
-            ExpressionInner::Call(call) => call.args().to_vec(),
-            ExpressionInner::Bytes(..) => vec![],
+            ExpressionInner::Variable(x) => Box::new(std::iter::once(*x)),
+            ExpressionInner::Call(call) => Box::new(call.args().iter().cloned()),
+            ExpressionInner::Bytes(..) => Box::new(std::iter::empty()),
         }
     }
 }
@@ -828,7 +827,7 @@ impl<'src> Function<'src> {
 
         let uses_variables: HashMap<&Statement, Vec<VariableName>> = body
             .iter()
-            .map(|stmt| (stmt, stmt.expression().used_variables()))
+            .map(|stmt| (stmt, stmt.expression().used_variables().collect()))
             .collect();
         let defined_in: HashMap<VariableName, &Statement> = body
             .iter()
