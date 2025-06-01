@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use bitfony::parse_program_string;
+use maxiscript::parse_program_string;
 
 // TODO: Use arbitrary
 fuzz_target!(|src: &str| {

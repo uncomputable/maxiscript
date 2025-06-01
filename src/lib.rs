@@ -27,7 +27,7 @@ pub fn compile_program(source_code: &str) -> (Option<bitcoin::ScriptBuf>, Vec<Di
     });
 
     let program: Option<ir::Program> = program.as_ref().and_then(|program| {
-        info!("Compiling Bitfony program:\n{program}");
+        info!("Maxiscript source code:\n{program}");
         let (program, ir_errors) = analyze(program);
         diagnostics.extend(ir_errors);
         program
@@ -35,7 +35,7 @@ pub fn compile_program(source_code: &str) -> (Option<bitcoin::ScriptBuf>, Vec<Di
 
     let target_code: Option<bitcoin::ScriptBuf> = program.as_ref().map(|program| {
         let bitcoin_script = compile::compile(program);
-        info!("Resulting Bitcoin script:\n{bitcoin_script:?}");
+        info!("Bitcoin Script target code:\n{bitcoin_script:?}");
         bitcoin_script
     });
 

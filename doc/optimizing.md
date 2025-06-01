@@ -34,10 +34,10 @@
 
 - optimize each function as a separate unit
     - order of inputs / outputs is fixed across all calls to the function
-        - set by the bitfony programmer
+        - set by the maxiscript programmer
         - todo: optimize by the compiler in a later version
     - fetch arguments from stack dynamically and optimally for each call
-- each bitfony line is a chunk that produces and consumes variables
+- each maxiscript line is a chunk that produces and consumes variables
     - order chunks according to value dependency (topological order)
     - iterate over all valid orders and choose best result
     - best = smallest number of target code bytes

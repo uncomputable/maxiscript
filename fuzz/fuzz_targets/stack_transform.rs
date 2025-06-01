@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use bitfony::opcodes::{find_shortest_transformation, StackOp};
+use maxiscript::stack::{find_shortest_transformation, StackOp};
 
 fuzz_target!(|input: (&[u8], &[u8])| {
     let (source_stack, target) = input;
