@@ -113,7 +113,6 @@ impl<'src> Stack<'src> {
 // TODO: Move into IR?
 struct Dependencies<'a, 'src> {
     depends_on: HashMap<&'a Statement<'src>, Vec<&'a Statement<'src>>>,
-    uses_variables: HashMap<&'a Statement<'src>, Vec<VariableName<'src>>>,
 }
 
 /// Function arguments are assumed to be already on the stack.
@@ -122,8 +121,6 @@ fn get_statement_dependencies<'src, 'a: 'src>(f: &'a Function) -> Dependencies<'
     let params: HashSet<VariableName> = f.params().iter().copied().collect();
     let mut defined_in: HashMap<VariableName, &Statement> = HashMap::new();
     let mut depends_on: HashMap<&Statement, Vec<&Statement>> =
-        HashMap::with_capacity(f.body().len());
-    let mut uses_variables: HashMap<&Statement, Vec<VariableName>> =
         HashMap::with_capacity(f.body().len());
 
     for statement in f.body().iter() {
@@ -138,7 +135,6 @@ fn get_statement_dependencies<'src, 'a: 'src>(f: &'a Function) -> Dependencies<'
             ExpressionInner::Variable(name) if !params.contains(name) => {
                 let &defining_statement = defined_in.get(name).expect("variable should be defined");
                 depends_on.insert(statement, vec![defining_statement]);
-                uses_variables.insert(statement, vec![name]);
             }
             ExpressionInner::Call(call) => {
                 let stmts: Vec<&Statement> = call
@@ -148,7 +144,6 @@ fn get_statement_dependencies<'src, 'a: 'src>(f: &'a Function) -> Dependencies<'
                     .map(|name| *defined_in.get(name).expect("variable should be defined"))
                     .collect();
                 depends_on.insert(statement, stmts);
-                uses_variables.insert(statement, call.args().to_vec());
             }
             _ => {
                 depends_on.insert(statement, vec![]);
@@ -156,10 +151,7 @@ fn get_statement_dependencies<'src, 'a: 'src>(f: &'a Function) -> Dependencies<'
         }
     }
 
-    Dependencies {
-        depends_on,
-        uses_variables,
-    }
+    Dependencies { depends_on }
 }
 
 pub fn compile(program: &Program) -> bitcoin::ScriptBuf {
@@ -195,9 +187,14 @@ pub fn compile_function_body<'src>(
             // TODO: to_copy can be cached
             let to_copy: Vec<VariableName> = ordered_statements[i + 1..]
                 .iter()
-                .filter_map(|&&stmt| dependencies.uses_variables.get(stmt))
+                .map(|stmt| stmt.expression().used_variables())
+                .chain(
+                    function
+                        .return_expr()
+                        .iter()
+                        .map(|expr| expr.used_variables()),
+                )
                 .flatten()
-                .copied()
                 .collect();
 
             match statement {
@@ -215,6 +212,10 @@ pub fn compile_function_body<'src>(
                     compile_expr(expr, compiled_bodies, &mut script, &mut stack, &to_copy);
                 }
             }
+        }
+        if let Some(expr) = function.return_expr() {
+            let to_copy = &[];
+            compile_expr(expr, compiled_bodies, &mut script, &mut stack, to_copy);
         }
 
         if script.len() < best_cost {
@@ -241,8 +242,8 @@ fn compile_expr<'src>(
     to_copy: &[VariableName<'src>],
 ) {
     match expr.inner() {
-        ExpressionInner::Variable(..) => {
-            unreachable!("variable alias should be inlined")
+        ExpressionInner::Variable(x) => {
+            push_args_script(script, stack, &[*x], to_copy);
         }
         ExpressionInner::Bytes(bytes) => {
             let bounded_bytes: &script::PushBytes = bytes
@@ -252,53 +253,7 @@ fn compile_expr<'src>(
             script.push_bytes(bounded_bytes);
         }
         ExpressionInner::Call(call) => {
-            // Script to get arguments onto the stack top
-            match stack::find_shortest_transformation2(stack.variables(), call.args(), to_copy) {
-                None => unreachable!("variables should be defined"),
-                Some(transformation_script) => {
-                    let mut pushed_args = 0;
-
-                    for op in transformation_script.iter() {
-                        let opcode = match op {
-                            StackOp::Dup => opcodes::all::OP_DUP,
-                            StackOp::_2Dup => opcodes::all::OP_2DUP,
-                            StackOp::_3Dup => opcodes::all::OP_3DUP,
-                            StackOp::Over => opcodes::all::OP_OVER,
-                            StackOp::_2Over => opcodes::all::OP_2OVER,
-                            StackOp::Tuck => opcodes::all::OP_TUCK,
-                            StackOp::Pick(name) => {
-                                script.push_int(stack.position(name, pushed_args));
-                                opcodes::all::OP_PICK
-                            }
-                            StackOp::Swap => opcodes::all::OP_SWAP,
-                            StackOp::_2Swap => opcodes::all::OP_2SWAP,
-                            StackOp::Rot => opcodes::all::OP_ROT,
-                            StackOp::_2Rot => opcodes::all::OP_2ROT,
-                            StackOp::Roll(name) => {
-                                // TODO: What if OP_ROLL uses variables inside target?
-                                script.push_int(stack.position(name, pushed_args));
-                                opcodes::all::OP_ROLL
-                            }
-                        };
-                        script.push_opcode(opcode);
-
-                        match op {
-                            StackOp::Dup | StackOp::Over | StackOp::Tuck | StackOp::Pick(_) => {
-                                pushed_args += 1
-                            }
-                            StackOp::_2Dup | StackOp::_2Over => pushed_args += 2,
-                            StackOp::_3Dup => pushed_args += 3,
-                            StackOp::Swap
-                            | StackOp::_2Swap
-                            | StackOp::Rot
-                            | StackOp::_2Rot
-                            | StackOp::Roll(_) => {}
-                        }
-                    }
-                }
-            }
-
-            // Script that computes function body
+            push_args_script(script, stack, call.args(), to_copy);
             match call.name() {
                 CallName::Builtin(operation) => {
                     script.push_opcode(operation.serialize());
@@ -312,4 +267,56 @@ fn compile_expr<'src>(
     }
 
     stack.remove_moved_variables(to_copy);
+}
+
+fn push_args_script<'src>(
+    script: &mut MyScript,
+    stack: &mut Stack<'src>,
+    args: &[VariableName<'src>],
+    to_copy: &[VariableName<'src>],
+) {
+    match stack::find_shortest_transformation2(stack.variables(), args, to_copy) {
+        None => unreachable!("variables should be defined"),
+        Some(transformation_script) => {
+            let mut pushed_args = 0;
+
+            for op in transformation_script.iter() {
+                let opcode = match op {
+                    StackOp::Dup => opcodes::all::OP_DUP,
+                    StackOp::_2Dup => opcodes::all::OP_2DUP,
+                    StackOp::_3Dup => opcodes::all::OP_3DUP,
+                    StackOp::Over => opcodes::all::OP_OVER,
+                    StackOp::_2Over => opcodes::all::OP_2OVER,
+                    StackOp::Tuck => opcodes::all::OP_TUCK,
+                    StackOp::Pick(name) => {
+                        script.push_int(stack.position(name, pushed_args));
+                        opcodes::all::OP_PICK
+                    }
+                    StackOp::Swap => opcodes::all::OP_SWAP,
+                    StackOp::_2Swap => opcodes::all::OP_2SWAP,
+                    StackOp::Rot => opcodes::all::OP_ROT,
+                    StackOp::_2Rot => opcodes::all::OP_2ROT,
+                    StackOp::Roll(name) => {
+                        // TODO: What if OP_ROLL uses variables inside target?
+                        script.push_int(stack.position(name, pushed_args));
+                        opcodes::all::OP_ROLL
+                    }
+                };
+                script.push_opcode(opcode);
+
+                match op {
+                    StackOp::Dup | StackOp::Over | StackOp::Tuck | StackOp::Pick(_) => {
+                        pushed_args += 1
+                    }
+                    StackOp::_2Dup | StackOp::_2Over => pushed_args += 2,
+                    StackOp::_3Dup => pushed_args += 3,
+                    StackOp::Swap
+                    | StackOp::_2Swap
+                    | StackOp::Rot
+                    | StackOp::_2Rot
+                    | StackOp::Roll(_) => {}
+                }
+            }
+        }
+    }
 }
