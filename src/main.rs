@@ -1,9 +1,9 @@
 use std::{env, fs};
 
 use ariadne::{Color, Label, Report, ReportKind, sources};
-use bitfony::{Severity, analyze, compile, lex_program, parse_program};
 use hex_conservative::DisplayHex;
 use log::info;
+use maxiscript::{Severity, analyze, compile, lex_program, parse_program};
 
 fn main() {
     env_logger::Builder::new()
