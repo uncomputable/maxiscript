@@ -1,4 +1,4 @@
-use chumsky::prelude::SimpleSpan;
+use chumsky::prelude::{Rich, SimpleSpan};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Diagnostic {
@@ -109,5 +109,17 @@ impl Context {
 
     pub fn span(&self) -> SimpleSpan {
         self.span
+    }
+}
+
+impl<'src> From<Rich<'src, String>> for Diagnostic {
+    fn from(e: Rich<String>) -> Self {
+        let mut diagnostic = Diagnostic::new(e.to_string(), *e.span(), Severity::Error)
+            .in_context(e.reason().to_string(), *e.span());
+        for (label, span) in e.contexts() {
+            diagnostic = diagnostic.in_context2(format!("while parsing this {}", label), *span);
+        }
+
+        diagnostic
     }
 }

@@ -39,13 +39,6 @@ impl<'src> Program<'src> {
     pub fn items(&self) -> &[Function<'src>] {
         &self.items
     }
-
-    /// Accesses the main function of the program.
-    pub fn main_function(&self) -> &Function {
-        let ret = self.items().last().expect("main function should exist");
-        debug_assert_eq!(ret.name(), "main");
-        ret
-    }
 }
 
 impl ShallowClone for Program<'_> {
@@ -90,6 +83,7 @@ impl<'src> Function<'src> {
     /// Accesses the parameters of the function, according to the source code.
     ///
     /// This list may contain _unused_ parameters.
+    #[expect(dead_code)]
     pub fn params_source(&self) -> &[VariableName<'src>] {
         &self.params_source
     }
@@ -123,11 +117,13 @@ impl<'src> Function<'src> {
     }
 
     /// Accesses the span of the name of the function.
+    #[expect(dead_code)]
     pub fn span_name(&self) -> SimpleSpan {
         self.span_name
     }
 
     /// Accesses the spans of each parameter of the function.
+    #[expect(dead_code)]
     pub fn span_params(&self) -> &[SimpleSpan] {
         &self.span_params
     }
@@ -138,6 +134,7 @@ impl<'src> Function<'src> {
     }
 
     /// Accesses the span of the return type of the function.
+    #[expect(dead_code)]
     pub fn span_return(&self) -> SimpleSpan {
         self.span_return
     }

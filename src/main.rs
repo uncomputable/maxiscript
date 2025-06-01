@@ -2,8 +2,7 @@ use std::{env, fs};
 
 use ariadne::{Color, Label, Report, ReportKind, sources};
 use hex_conservative::DisplayHex;
-use log::info;
-use maxiscript::{Severity, analyze, compile, lex_program, parse_program};
+use maxiscript::Severity;
 
 fn main() {
     env_logger::Builder::new()
@@ -11,50 +10,15 @@ fn main() {
         .init();
 
     let filename = env::args().nth(1).expect("Expected file argument");
-    let src = fs::read_to_string(&filename).expect("Failed to read file");
+    let source_code = fs::read_to_string(&filename).expect("Failed to read file");
 
-    let (tokens, mut errors) = lex_program(&src);
+    let (target_code, diagnostics) = maxiscript::compile_program(&source_code);
 
-    let parse_program = tokens.as_ref().and_then(|tokens| {
-        let (program, parse_errors) = parse_program(&src, tokens);
-        errors.extend(parse_errors);
-        program
-    });
-
-    let mut ir_errors = Vec::new();
-
-    if let Some(parse_program) = parse_program {
-        info!("Compiling Bitfony program:\n{parse_program}");
-        let (ir_program, errors) = analyze(&parse_program);
-        ir_errors.extend(errors);
-
-        if let Some(ir_program) = ir_program {
-            let bitcoin_script = compile(&ir_program);
-            info!("Resulting Bitcoin script:\n{bitcoin_script:?}");
-            println!("{}", bitcoin_script.as_bytes().to_lower_hex_string());
-        }
+    if let Some(target_code) = target_code {
+        println!("{}", target_code.as_bytes().to_lower_hex_string());
     }
 
-    errors.into_iter().for_each(|e| {
-        Report::build(ReportKind::Error, (filename.clone(), e.span().into_range()))
-            .with_config(ariadne::Config::new().with_index_type(ariadne::IndexType::Byte))
-            .with_message(e.to_string())
-            .with_label(
-                Label::new((filename.clone(), e.span().into_range()))
-                    .with_message(e.reason().to_string())
-                    .with_color(Color::Red),
-            )
-            .with_labels(e.contexts().map(|(label, span)| {
-                Label::new((filename.clone(), span.into_range()))
-                    .with_message(format!("while parsing this {}", label))
-                    .with_color(Color::Yellow)
-            }))
-            .finish()
-            .print(sources([(filename.clone(), src.clone())]))
-            .expect("write to stdout should not fail")
-    });
-
-    ir_errors.into_iter().for_each(|e| {
+    diagnostics.into_iter().for_each(|e| {
         let kind = match e.severity() {
             Severity::Error => ReportKind::Error,
             Severity::Warning => ReportKind::Warning,
@@ -77,7 +41,7 @@ fn main() {
         }
         report
             .finish()
-            .print(sources([(filename.clone(), src.clone())]))
+            .print(sources([(filename.clone(), source_code.clone())]))
             .expect("write to stdout should not fail")
     });
 }

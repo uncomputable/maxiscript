@@ -1,7 +1,9 @@
 use chumsky::Parser;
 use chumsky::prelude::{Input, Rich};
+use log::info;
 
 use crate::parse::{Spanned, Token, lexer, program_parser};
+pub use error::{Diagnostic, Severity};
 
 mod compile;
 mod error;
@@ -12,10 +14,35 @@ mod sorting;
 mod stack;
 mod util;
 
-pub use compile::compile;
-pub use error::{Diagnostic, Severity};
+pub fn compile_program(source_code: &str) -> (Option<bitcoin::ScriptBuf>, Vec<Diagnostic>) {
+    let mut diagnostics = vec![];
 
-pub fn lex_program(src: &str) -> (Option<Vec<Spanned<Token>>>, Vec<Rich<String>>) {
+    let (tokens, lex_errors) = lex_program(source_code);
+    diagnostics.extend(lex_errors.into_iter().map(Diagnostic::from));
+
+    let program: Option<parse::Program> = tokens.as_ref().and_then(|tokens| {
+        let (program, parse_errors) = parse_program(source_code, tokens);
+        diagnostics.extend(parse_errors.into_iter().map(Diagnostic::from));
+        program
+    });
+
+    let program: Option<ir::Program> = program.as_ref().and_then(|program| {
+        info!("Compiling Bitfony program:\n{program}");
+        let (program, ir_errors) = analyze(program);
+        diagnostics.extend(ir_errors);
+        program
+    });
+
+    let target_code: Option<bitcoin::ScriptBuf> = program.as_ref().map(|program| {
+        let bitcoin_script = compile::compile(program);
+        info!("Resulting Bitcoin script:\n{bitcoin_script:?}");
+        bitcoin_script
+    });
+
+    (target_code, diagnostics)
+}
+
+fn lex_program(src: &str) -> (Option<Vec<Spanned<Token>>>, Vec<Rich<String>>) {
     let (tokens, lex_errors) = lexer().parse(src).into_output_errors();
     let lex_errors = lex_errors
         .into_iter()
@@ -24,7 +51,7 @@ pub fn lex_program(src: &str) -> (Option<Vec<Spanned<Token>>>, Vec<Rich<String>>
     (tokens, lex_errors)
 }
 
-pub fn parse_program<'src>(
+fn parse_program<'src>(
     src: &'src str,
     tokens: &'src [Spanned<Token<'src>>],
 ) -> (Option<parse::Program<'src>>, Vec<Rich<'src, String>>) {
@@ -38,9 +65,7 @@ pub fn parse_program<'src>(
     (program, parse_errors)
 }
 
-pub fn analyze<'src>(
-    program: &parse::Program<'src>,
-) -> (Option<ir::Program<'src>>, Vec<Diagnostic>) {
+fn analyze<'src>(program: &parse::Program<'src>) -> (Option<ir::Program<'src>>, Vec<Diagnostic>) {
     ir::Program::analyze(program)
 }
 
