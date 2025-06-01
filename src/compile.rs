@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use bitcoin::opcodes;
-use bitcoin::script::PushBytes;
+use bitcoin::{opcodes, script};
 use log::{Level, debug, log_enabled};
 
 use crate::ir::{CallName, Expression, ExpressionInner, Function, Program, Statement};
@@ -9,34 +8,50 @@ use crate::parse::{FunctionName, VariableName};
 use crate::sorting;
 use crate::stack::{self, StackOp};
 
-/// Position of an item in the stack.
-///
-/// The position is counted from the stack top.
-/// The topmost item has position 0, the second topmost item has position 1, and so on.
-///
-/// Positions are optimized for size in Bitcoin script.
-/// Position 0 fits into 0 bytes,
-/// positions 1 to 255 fits into 1 byte, and so on.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-enum Position {
-    /// Position 0.
-    U0,
-    /// Positions `1..=255`.
-    U8([u8; 1]),
-    /// Positions `256..=65535`.
-    U16([u8; 2]),
-    /// Positions `65535..=4294967295`.
-    U32([u8; 4]),
-}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct MyScript(Vec<u8>);
 
-impl AsRef<PushBytes> for Position {
-    fn as_ref(&self) -> &PushBytes {
-        match self {
-            Position::U0 => [].as_ref(),
-            Position::U8(n) => n.as_ref(),
-            Position::U16(n) => n.as_ref(),
-            Position::U32(n) => n.as_ref(),
+impl MyScript {
+    pub fn into_script(self) -> bitcoin::ScriptBuf {
+        bitcoin::ScriptBuf::from_bytes(self.0)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[expect(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn append(&mut self, other: Self) {
+        self.0.extend(other.0)
+    }
+
+    pub fn push_int(&mut self, data: i64) {
+        let builder = script::Builder::new().push_int(data);
+        self.0.extend(builder.into_bytes());
+    }
+
+    pub fn push_bytes<T: AsRef<script::PushBytes>>(&mut self, data: T) {
+        let data = data.as_ref();
+
+        // Ensure minimal data pushes
+        // https://github.com/bitcoin/bitcoin/blob/4b1d48a6866b24f0ed027334c6de642fc848d083/src/script/script.cpp#L373
+        if data.len() == 1 && 1 <= data[0] && data[0] <= 16 {
+            self.push_opcode(bitcoin::Opcode::from(0x50 + data[0]));
+        } else if data.len() == 1 && data[0] == 0x81 {
+            self.push_opcode(opcodes::all::OP_PUSHNUM_NEG1);
+        } else {
+            let builder = script::Builder::new().push_slice(data);
+            self.0.extend(builder.into_bytes());
         }
+    }
+
+    pub fn push_opcode(&mut self, data: bitcoin::Opcode) {
+        let builder = script::Builder::new().push_opcode(data);
+        self.0.extend(builder.into_bytes());
     }
 }
 
@@ -79,31 +94,19 @@ impl<'src> Stack<'src> {
     }
 
     /// Returns the position of the given variable `name`  in the stack.
-    pub fn position(&self, name: &VariableName<'src>, pushed_args: usize) -> Position {
+    pub fn position(&self, name: &VariableName<'src>, pushed_args: usize) -> i64 {
         debug_assert!(
             size_of::<u32>() <= size_of::<usize>(),
             "32-bit machine or higher"
         );
-        let pos = self
-            .variables
+        self.variables
             .iter()
             .rev()
             .position(|x| x == name)
             .expect("variable should be defined")
-            .saturating_add(pushed_args);
-        let [b0, b1, b2, b3, ..] = pos.to_le_bytes();
-        // FIXME: Double check for i32 shenanigans in Bitcoin script!
-        if pos == 0 {
-            Position::U0
-        } else if pos <= u8::MAX as usize {
-            Position::U8([b0])
-        } else if pos <= u16::MAX as usize {
-            Position::U16([b0, b1])
-        } else if pos <= u32::MAX as usize {
-            Position::U32([b0, b1, b2, b3])
-        } else {
-            unreachable!("Stack size exceeded u32::MAX");
-        }
+            .saturating_add(pushed_args)
+            .try_into()
+            .expect("position should be within interval [0, i64::MAX]")
     }
 }
 
@@ -160,7 +163,7 @@ fn get_statement_dependencies<'src, 'a: 'src>(f: &'a Function) -> Dependencies<'
 }
 
 pub fn compile(program: &Program) -> bitcoin::ScriptBuf {
-    let mut compiled_bodies: HashMap<FunctionName, bitcoin::ScriptBuf> = HashMap::new();
+    let mut compiled_bodies: HashMap<FunctionName, MyScript> = HashMap::new();
 
     for function in program.items() {
         let body = compile_function_body(function, &compiled_bodies);
@@ -171,19 +174,20 @@ pub fn compile(program: &Program) -> bitcoin::ScriptBuf {
     compiled_bodies
         .remove("main")
         .expect("main function should be compiled")
+        .into_script()
 }
 
 pub fn compile_function_body<'src>(
     function: &Function<'src>,
-    compiled_bodies: &HashMap<FunctionName<'src>, bitcoin::ScriptBuf>,
-) -> bitcoin::ScriptBuf {
+    compiled_bodies: &HashMap<FunctionName<'src>, MyScript>,
+) -> MyScript {
     let dependencies = get_statement_dependencies(function);
 
-    let mut best_script = bitcoin::ScriptBuf::new();
+    let mut best_script = MyScript::default();
     let mut best_cost = usize::MAX;
 
     for ordered_statements in sorting::all_topological_orders(&dependencies.depends_on) {
-        let mut script = bitcoin::ScriptBuf::new();
+        let mut script = MyScript::default();
         let mut stack = Stack::for_function(function);
 
         for i in 0..ordered_statements.len() {
@@ -231,8 +235,8 @@ pub fn compile_function_body<'src>(
 
 fn compile_expr<'src>(
     expr: &Expression<'src>,
-    compiled_bodies: &HashMap<FunctionName<'src>, bitcoin::ScriptBuf>,
-    script: &mut bitcoin::ScriptBuf,
+    compiled_bodies: &HashMap<FunctionName<'src>, MyScript>,
+    script: &mut MyScript,
     stack: &mut Stack<'src>,
     to_copy: &[VariableName<'src>],
 ) {
@@ -241,11 +245,11 @@ fn compile_expr<'src>(
             unreachable!("variable alias should be inlined")
         }
         ExpressionInner::Bytes(bytes) => {
-            let bounded_bytes: &PushBytes = bytes
+            let bounded_bytes: &script::PushBytes = bytes
                 .as_ref()
                 .try_into()
                 .expect("hex should not be too long");
-            script.push_slice(bounded_bytes);
+            script.push_bytes(bounded_bytes);
         }
         ExpressionInner::Call(call) => {
             // Script to get arguments onto the stack top
@@ -263,7 +267,7 @@ fn compile_expr<'src>(
                             StackOp::_2Over => opcodes::all::OP_2OVER,
                             StackOp::Tuck => opcodes::all::OP_TUCK,
                             StackOp::Pick(name) => {
-                                script.push_slice(stack.position(name, pushed_args));
+                                script.push_int(stack.position(name, pushed_args));
                                 opcodes::all::OP_PICK
                             }
                             StackOp::Swap => opcodes::all::OP_SWAP,
@@ -272,7 +276,7 @@ fn compile_expr<'src>(
                             StackOp::_2Rot => opcodes::all::OP_2ROT,
                             StackOp::Roll(name) => {
                                 // TODO: What if OP_ROLL uses variables inside target?
-                                script.push_slice(stack.position(name, pushed_args));
+                                script.push_int(stack.position(name, pushed_args));
                                 opcodes::all::OP_ROLL
                             }
                         };
@@ -300,15 +304,8 @@ fn compile_expr<'src>(
                     script.push_opcode(operation.serialize());
                 }
                 CallName::Custom(function) => {
-                    let body_script_bytes = compiled_bodies[function.name()].as_bytes();
-                    *script = bitcoin::ScriptBuf::from_bytes(
-                        script
-                            .as_bytes()
-                            .iter()
-                            .chain(body_script_bytes.iter())
-                            .copied()
-                            .collect(),
-                    );
+                    let body_script_bytes = compiled_bodies[function.name()].clone();
+                    script.append(body_script_bytes);
                 }
             }
         }
