@@ -1,4 +1,5 @@
 use chumsky::prelude::{Rich, SimpleSpan};
+use std::fmt;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Diagnostic {
@@ -93,6 +94,50 @@ impl Diagnostic {
 
     pub fn severity(&self) -> Severity {
         self.severity
+    }
+
+    #[cfg(test)]
+    pub fn contains(&self, pattern: &str) -> bool {
+        self.top.message().contains(pattern)
+            || self
+                .contexts
+                .iter()
+                .any(|ctx| ctx.message.contains(pattern))
+            || self
+                .contexts2
+                .iter()
+                .any(|ctx| ctx.message.contains(pattern))
+    }
+}
+
+impl fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.severity, self.top.message)?;
+        if !self.contexts().is_empty() || !self.contexts2().is_empty() {
+            writeln!(f)?;
+        }
+        for (index, ctx) in self.contexts().iter().enumerate() {
+            write!(f, "1> {}", ctx.message())?;
+            if index != self.contexts().len() - 1 {
+                writeln!(f)?;
+            }
+        }
+        for (index, ctx) in self.contexts2().iter().enumerate() {
+            write!(f, "2> {}", ctx.message())?;
+            if index != self.contexts2().len() - 1 {
+                writeln!(f)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Error => f.write_str("Error"),
+            Self::Warning => f.write_str("Warning"),
+        }
     }
 }
 

@@ -91,6 +91,168 @@ pub fn parse_program_string(src: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use itertools::Itertools;
+
+    fn assert_ok(source_code: &'static str) {
+        let (target_code, diagnostics) = compile_program(source_code);
+        for e in &diagnostics {
+            if e.severity() == Severity::Error {
+                panic!("Expected no errors, but got: `{e}`");
+            }
+        }
+        if target_code.is_none() {
+            panic!(
+                "The compiler failed to produce any target code! Here are all diagnostics: {}",
+                diagnostics.iter().map(|e| format!("`{e}`")).join(", ")
+            );
+        }
+        // TODO: Execute target code
+    }
+
+    fn assert_error<Str: ToString>(source_code: &'static str, pattern: Str) {
+        let (target_code, diagnostics) = compile_program(source_code);
+        if let Some(target_code) = target_code {
+            panic!("Expected empty target code, but got: `{target_code}`");
+        }
+        let pattern = pattern.to_string();
+        if diagnostics
+            .iter()
+            .find(|e| e.severity() == Severity::Error && e.top().message().contains(&pattern))
+            .is_none()
+        {
+            panic!(
+                "Could not find the expected error `{pattern}`. Here are all diagnostics: {}",
+                diagnostics.iter().map(|e| format!("`{e}`")).join(", ")
+            );
+        }
+    }
+
+    fn assert_warnings(source_code: &'static str, patterns: &[&'static str]) {
+        let (target_code, diagnostics) = compile_program(source_code);
+        if target_code.is_none() {
+            panic!(
+                "The compiler failed to produce any target code! Here are all diagnostics:\n{}",
+                diagnostics.iter().map(|e| format!("{e}")).join("\n")
+            );
+        }
+        for pattern in patterns {
+            if diagnostics
+                .iter()
+                .find(|e| e.severity() == Severity::Warning && e.contains(pattern))
+                .is_none()
+            {
+                panic!(
+                    "Could not find the expected warning `{pattern}`. Here are all diagnostics:\n{}",
+                    diagnostics.iter().map(|e| format!("{e}")).join("\n")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn call_function_before_definition() {
+        let source_code = "
+            fn main() {
+                f();
+            }
+
+            fn f() {}
+        ";
+        assert_ok(source_code);
+    }
+
+    #[test]
+    fn duplicate_argument() {
+        let source_code = "
+            fn main() {
+                let x = 0x01;
+                op::equal_verify(x, x);
+            }
+        ";
+        assert_error(source_code, "argument `x` cannot appear twice");
+    }
+
+    #[test]
+    fn duplicate_argument_alias() {
+        let source_code = "
+            fn eq(x, y) {
+               op::equal_verify(x, y);
+            }
+
+            fn main() {
+                let x = 0x01;
+                let y = x;
+                let z = y;
+                let u = z;
+                let v = u;
+                let w = eq(x, u);
+            }
+        ";
+        assert_error(source_code, "argument `x` cannot appear twice");
+    }
+
+    #[test]
+    fn recursive_call() {
+        let source_code = "
+            fn f() {
+                g();
+            }
+
+            fn g() {
+                h();
+            }
+
+            fn h() {
+                f();
+            }
+
+            fn main() {
+                f();
+            }
+        ";
+        assert_error(source_code, "recursive call");
+    }
+
+    #[test]
+    fn unused_variables() {
+        let source_code = "
+            fn f(x, y) {
+                let z = 0x01;
+                op::equal_verify(x, z)
+            } // y unused
+
+            fn main() {
+                let x_ = 0x01;
+                let y_ = 0x02;
+                f(x_, y_)
+            } // y_ implicitly unused
+        ";
+        assert_warnings(source_code, &["`y` is never used", "`y_` is never used"]);
+    }
+
+    #[test]
+    fn unused_variables_chain() {
+        let source_code = "
+            fn f(x, y, z) { g(x, y) } // z unused
+            fn g(x_, y_) { h(x_) } // y_ unused
+            fn h(x__) { } // x__ unused
+
+            fn main() {
+                let x___ = 0x01;
+                let y___ = 0x02;
+                let z___ = 0x03;
+                f(x___, y___, z___);
+            } // x___, y___, z___ implicitly unused
+        ";
+        assert_warnings(
+            source_code,
+            &[
+                "`z` is never used",
+                "`y_` is never used",
+                "`x__` is never used",
+            ],
+        );
+    }
 
     #[test]
     fn fuzz_regression1() {
