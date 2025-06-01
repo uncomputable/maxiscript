@@ -163,10 +163,11 @@ pub fn compile(program: &Program) -> bitcoin::ScriptBuf {
         compiled_bodies.insert(function.name(), body);
     }
 
-    compiled_bodies
+    let mut script = compiled_bodies
         .remove("main")
-        .expect("main function should be compiled")
-        .into_script()
+        .expect("main function should be compiled");
+    script.push_opcode(opcodes::OP_TRUE);
+    script.into_script()
 }
 
 pub fn compile_function_body<'src>(
