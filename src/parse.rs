@@ -487,7 +487,7 @@ impl fmt::Display for Call<'_> {
         write!(f, "{}(", self.name)?;
         for (index, arg) in self.args.iter().enumerate() {
             write!(f, "{arg}")?;
-            if index < self.args().len() - 1 {
+            if index < self.args.len() - 1 {
                 write!(f, ", ")?;
             }
         }

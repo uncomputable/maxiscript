@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chumsky::span::SimpleSpan;
+use hex_conservative::DisplayHex;
 use itertools::Itertools;
 
 use crate::op::Operation;
@@ -186,6 +187,15 @@ impl<'src> Statement<'src> {
     }
 }
 
+impl fmt::Display for Statement<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Assignment(ass) => write!(f, "{ass};"),
+            Self::UnitExpr(expr) => write!(f, "{expr};"),
+        }
+    }
+}
+
 impl ShallowClone for Statement<'_> {
     fn shallow_clone(&self) -> Self {
         match self {
@@ -216,6 +226,12 @@ impl<'src> Assignment<'src> {
     /// Accesses the span of the variable that is being assigned.
     pub fn span_name(&self) -> SimpleSpan {
         self.span_name
+    }
+}
+
+impl fmt::Display for Assignment<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "let {} = {}", self.name, self.expression)
     }
 }
 
@@ -262,6 +278,16 @@ impl ShallowClone for Expression<'_> {
         Self {
             inner: self.inner.shallow_clone(),
             is_unit: self.is_unit,
+        }
+    }
+}
+
+impl fmt::Display for Expression<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.inner() {
+            ExpressionInner::Variable(name) => write!(f, "{name}"),
+            ExpressionInner::Bytes(bytes) => write!(f, "0x{}", bytes.to_lower_hex_string()),
+            ExpressionInner::Call(call) => write!(f, "{call}"),
         }
     }
 }
@@ -359,6 +385,19 @@ impl<'src> Call<'src> {
     /// Returns `true` if the called function returns no values.
     pub fn is_unit(&self) -> bool {
         self.name.is_unit()
+    }
+}
+
+impl fmt::Display for Call<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}(", self.name)?;
+        for (index, arg) in self.args.iter().enumerate() {
+            write!(f, "{arg}")?;
+            if index < self.args.len() - 1 {
+                write!(f, ", ")?;
+            }
+        }
+        write!(f, ")")
     }
 }
 
