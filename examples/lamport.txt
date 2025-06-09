@@ -1,0 +1,47 @@
+// msg: bool
+fn verify_bit_signature(pk_0, pk_1, msg, sig) {
+    let hash = op::sha256(sig);
+    if msg {
+        op::check_equal(hash, pk_0);
+    } else {
+        op::check_equal(hash, pk_1);
+    }
+}
+
+fn main() {
+    // With witness support, these values would not be part of the script.
+    let sk0_0 = 0x97b0bfbff4;
+    let sk0_1 = 0x6da220eb1d;
+    let sk1_0 = 0xed7deba963;
+    let sk1_1 = 0xcc23e0bb0d;
+    let sk2_0 = 0xbc7c8cee30;
+    let sk2_1 = 0x2f4b4946b2;
+    let sk3_0 = 0x5a486d438d;
+    let sk3_1 = 0x69b01bd294;
+
+    let pk0_0 = 0xc80c640408ecbc98dba4ea863633264a6e8014d987efdf0df88cae12bba173ee;
+    let pk0_1 = 0x1d1129155942bc7e56ef95bfdade64d7e06640d57e1a4e3dbb4154aa23762365;
+    let pk1_0 = 0xd71cefbc667ad84d7e57c645c43f2ab5eaa989351e7c4bc774adc525929a0c07;
+    let pk1_1 = 0xb503b93be53e5156b9ea93aab50198c4553c070cbab8122016f653b8df24fb4c;
+    let pk2_0 = 0x20c71b560f4954111c4fa6c16ca0cdb63896ae69c8c6a9e4060491d5ea7dc0f5;
+    let pk2_1 = 0x7da4d898046669ebf7a81a771bbdbcfccfdcd9b9c7c61e1f44b278915cb9bc58;
+    let pk3_0 = 0xc2b0d82c826c909e2281e08029431ab39e9271d38c649fa6bea0de9523a59533;
+    let pk3_1 = 0x74e9ad16e3c8440bd36a3f213f95443c2ae4884a3729002da2e047a247a7def8;
+
+    // With witness support, these values would be assigned by the witness data.
+    let msg0 = 0x00;
+    let msg1 = 0x00;
+    let msg2 = 0x00;
+    let msg3 = 0x00;
+
+    // Sign each message bit with the corresponding secret key.
+    let sig0 = sk0_0;
+    let sig1 = sk1_0;
+    let sig2 = sk2_0;
+    let sig3 = sk3_0;
+
+    verify_bit_signature(pk0_0, pk0_1, msg0, sig0);
+    verify_bit_signature(pk1_0, pk1_1, msg1, sig1);
+    verify_bit_signature(pk2_0, pk2_1, msg2, sig2);
+    verify_bit_signature(pk3_0, pk3_1, msg3, sig3);
+}
